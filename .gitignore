@@ -1,0 +1,27 @@
+# Secrets and credentials
+*.pem
+*.key
+.env
+secrets/
+credentials/
+vault_pass.txt
+
+# Terraform
+*.tfstate
+*.tfstate.*
+.terraform/
+.terraform.lock.hcl
+
+# Ansible
+*.retry
+
+# OS generated files
+.DS_Store
+Thumbs.db
+
+# IDE files
+.vscode/settings.json
+.idea/
+
+# Logs
+*.log
