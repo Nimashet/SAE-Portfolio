@@ -1,0 +1,34 @@
+---
+# ===================================================================
+# GLOBAL ANSIBLE CONFIGURATION
+# Applied to all hosts in all environments
+# ===================================================================
+
+# Connection Optimization
+ansible_ssh_common_args: '-o StrictHostKeyChecking=yes -o ControlMaster=auto -o ControlPersist=60s'
+ansible_host_key_checking: false
+ansible_gathering: smart
+ansible_ssh_pipelining: true
+
+# Timeout Settings
+ansible_timeout: 30
+ansible_ssh_timeout: 10
+ansible_command_timeout: 30
+
+# Python Configuration
+ansible_python_interpreter: auto_silent
+
+# Retry Configuration  
+ansible_ssh_retries: 3
+
+# Performance Optimization
+ansible_strategy: free
+ansible_forks: 10
+
+# Global Security Settings
+ansible_become_method: sudo
+ansible_become_timeout: 30
+
+# Global Package Management
+package_update_cache: true
+package_upgrade: false  # Controlled upgrades only

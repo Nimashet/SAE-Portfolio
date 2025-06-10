@@ -1,0 +1,63 @@
+---
+# ===================================================================
+# AUTOMATION TARGETS CONFIGURATION
+# Systems that receive automation (managed hosts)
+# ===================================================================
+
+# SSH Configuration for Automation Targets
+ansible_ssh_private_key_file: "~/.ssh/sae_lab"
+ansible_user: automation
+
+# Base Automation Target Packages
+automation_target_packages:
+  # Python for Ansible
+  - python3
+  - python3-pip
+  
+  # Basic utilities
+  - curl
+  - wget
+  - rsync
+  - unzip
+  
+  # Security tools
+  - fail2ban
+  - ufw
+  
+  # Monitoring agents
+  - rsyslog
+
+# Automation Target Services
+automation_target_services:
+  - ssh
+  - rsyslog
+  - fail2ban
+
+# Security Configuration for Targets (Multi-VLAN Lab)
+automation_target_security:
+  ssh_port: 22
+  ssh_password_auth: false
+  ssh_root_login: false
+  fail2ban_enabled: true
+  ufw_enabled: true
+  ufw_default_policy: "deny"
+  ufw_ssh_from: 
+    - "{{ lab_networks.management.subnet }}"    # Servers VLAN (control-01 and other VMs)
+    - ""{{ lab_networks.home.subnet }}""    # Home VLAN (your desktop/workstation)
+    - ""{{ lab_networks.infrastructure.subnet }}""    # Infrastructure VLAN (if needed for monitoring)
+
+# Monitoring Configuration
+automation_target_monitoring:
+  log_forwarding: true
+  log_destination: "{{ lab_hosts['siem-01'] }}"  # siem-01
+  metrics_collection: true
+  health_check_interval: 300
+
+# Resource Guidelines (for capacity planning)
+automation_target_resources:
+  min_cpu_cores: 2
+  min_memory_gb: 4
+  min_disk_gb: 40
+
+
+

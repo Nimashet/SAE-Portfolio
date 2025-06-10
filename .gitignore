@@ -25,3 +25,55 @@ Thumbs.db
 
 # Logs
 *.log
+
+# ===================================================================
+# ENTERPRISE ANSIBLE SECURITY EXCLUSIONS
+# Added during SAE enterprise inventory implementation
+# ===================================================================
+
+# Environment-specific configurations (contain IP addresses and secrets)
+ansible/inventory/group_vars/environments/
+!ansible/inventory/group_vars/environments/.gitkeep
+
+# Production and staging configurations (when added later)
+ansible/inventory/group_vars/environments/production/
+ansible/inventory/group_vars/environments/staging/
+
+# Host-specific variables (minimal but sensitive when they exist)
+ansible/inventory/host_vars/
+!ansible/inventory/host_vars/.gitkeep
+
+# Vault files and encrypted data
+**/vault.yml
+**/vault_*.yml
+**/secrets.yml
+**/secrets_*.yml
+**/encrypted_*.yml
+
+# SSH and connection configuration
+ssh_config*
+**/ssh_config*
+connection_secrets*
+
+# Cloud provider credentials
+**/aws_credentials
+**/azure_credentials
+**/gcp_credentials
+
+# Dynamic inventory scripts with embedded credentials
+**/dynamic_inventory_*.py
+**/inventory_*.json
+
+# Terraform state that might contain IP addresses
+**/terraform.tfstate*
+**/terraform.tfvars*
+
+# Ansible log files that might contain sensitive data
+ansible.log
+**/ansible.log
+**/automation_*.log
+
+# Temporary files from ansible execution
+**/tmp_*
+**/.ansible_async*
+**/retry_files*

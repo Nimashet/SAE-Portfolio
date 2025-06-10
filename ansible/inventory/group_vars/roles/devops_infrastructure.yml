@@ -1,0 +1,61 @@
+---
+# ===================================================================
+# DEVOPS INFRASTRUCTURE CONFIGURATION
+# CI/CD, Git, registry, and development pipeline systems
+# ===================================================================
+
+# DevOps Platform Configuration
+devops_platform_packages:
+  # Git and version control
+  - git
+  - git-lfs
+  
+  # Container tools
+  - docker.io
+  - docker-compose
+  
+  # Build tools
+  - build-essential
+  - nodejs
+  - npm
+  
+  # Security scanning
+  - trivy
+  - hadolint
+
+# GitLab Configuration (for git-01)
+gitlab_config:
+  external_url: "https://git.sae.lab"
+  admin_email: "admin@sae.lab"
+  backup_retention_days: 7
+  registry_enabled: true
+  registry_external_url: "https://registry.sae.lab"
+  
+  # CI/CD Configuration
+  runner_executor: "docker"
+  runner_concurrent: 2
+  
+  # Security settings
+  signup_enabled: false
+  password_complexity: "high"
+
+# Container Registry Configuration
+container_registry:
+  enabled: true
+  port: 5000
+  storage_driver: "filesystem"
+  storage_path: "/opt/registry"
+  auth_enabled: true
+
+# DevOps Resource Allocation
+devops_resources:
+  min_cpu_cores: 4
+  min_memory_gb: 8
+  min_disk_gb: 120
+  
+# DevOps Security
+devops_security:
+  ssl_enabled: true
+  backup_encryption: true
+  vulnerability_scanning: true
+  secrets_management: "vault"

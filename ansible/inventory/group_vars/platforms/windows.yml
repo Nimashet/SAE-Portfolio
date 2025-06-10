@@ -1,0 +1,88 @@
+---
+# ===================================================================
+# WINDOWS PLATFORM CONFIGURATION
+# Settings specific to Windows systems across all roles
+# ===================================================================
+
+# Windows Connection Configuration
+ansible_connection: winrm
+ansible_winrm_transport: basic
+ansible_winrm_server_cert_validation: ignore
+ansible_port: 5986
+ansible_ssh_private_key_file: "~/.ssh/homelab"
+ansible_user: Administrator
+
+# Windows PowerShell Configuration
+ansible_shell_type: powershell
+ansible_winrm_operation_timeout_sec: 60
+ansible_winrm_read_timeout_sec: 70
+
+# Windows Domain Configuration
+windows_domain:
+  name: "lab.servers.lan"        # Aligned with your VLAN structure
+  netbios_name: "LAB"            # Updated from SAE
+  forest_functional_level: "WinThreshold"
+  domain_functional_level: "WinThreshold"
+  
+# Windows DNS Configuration  
+windows_dns:
+  forwarders:
+    - "{{ dns_servers.pihole_cluster }}"      # Your Pi-hole cluster (primary)
+    - "1.1.1.1"          # Backup if Pi-hole fails
+  reverse_lookup_zones:
+    - "3.24.172.in-addr.arpa"    # Servers VLAN reverse zone
+    - "7.24.172.in-addr.arpa"    # Infrastructure VLAN reverse zone
+
+# Windows Security Configuration
+windows_security:
+  password_complexity: true
+  password_min_length: 12
+  account_lockout_threshold: 5
+  account_lockout_duration: 30
+  
+  # Windows Firewall
+  firewall_enabled: true
+  firewall_default_action: "block"
+  
+  # Windows Updates
+  automatic_updates: false  # Manual control for lab
+  
+# Windows Features (Domain Controller specific)
+windows_features:
+  - AD-Domain-Services
+  - DNS
+  - DHCP
+  - RSAT-AD-Tools
+  - RSAT-DNS-Server
+
+# Windows Services Configuration
+windows_services:
+  enabled:
+    - DNS
+    - DHCP
+    - NTDS  # Active Directory Domain Services
+    - W32Time
+  disabled:
+    - Fax
+    - RemoteRegistry
+
+# Windows Event Logging
+windows_logging:
+  audit_account_logon: true
+  audit_logon_events: true
+  audit_object_access: false
+  audit_privilege_use: true
+  audit_process_tracking: false
+  audit_policy_change: true
+  audit_system_events: true
+  
+  # Log forwarding to SIEM
+  log_forwarding: true
+  siem_server: "{{ lab_hosts['siem-01'] }}"  # siem-01
+
+# Windows Resource Configuration
+windows_resources:
+  page_file_size: "auto"
+  temp_cleanup: true
+  disk_cleanup: true
+

@@ -1,0 +1,74 @@
+---
+# ===================================================================
+# SECURITY INFRASTRUCTURE CONFIGURATION
+# SIEM, monitoring, logging, and security analysis systems
+# ===================================================================
+
+# Security Platform Packages
+security_platform_packages:
+  # ELK Stack
+  - elasticsearch
+  - logstash
+  - kibana
+  
+  # Security Tools
+  - fail2ban
+  - ossec-hids
+  - clamav
+  - rkhunter
+  - chkrootkit
+  
+  # Network Analysis
+  - wireshark
+  - tcpdump
+  - nmap
+
+# ELK Stack Configuration
+elk_stack:
+  elasticsearch:
+    cluster_name: "sae-lab-security"
+    heap_size: "2g"
+    network_host: "0.0.0.0"
+    http_port: 9200
+    
+  logstash:
+    heap_size: "1g"
+    pipeline_workers: 2
+    pipeline_output_workers: 1
+    
+  kibana:
+    server_port: 5601
+    elasticsearch_hosts: ["http://localhost:9200"]
+    
+# Security Monitoring Configuration
+security_monitoring:
+  log_sources:
+    - "/var/log/auth.log"
+    - "/var/log/syslog"
+    - "/var/log/fail2ban.log"
+    - "/var/log/ufw.log"
+    
+  alert_thresholds:
+    failed_logins: 5
+    suspicious_processes: 10
+    disk_usage_percent: 85
+    memory_usage_percent: 90
+    
+  retention_policy:
+    logs_days: 30
+    metrics_days: 90
+    alerts_days: 365
+
+# Security Resource Allocation
+security_resources:
+  min_cpu_cores: 4
+  min_memory_gb: 8
+  min_disk_gb: 300  # Large disk for log storage
+
+# Security Policies
+security_policies:
+  log_forwarding_required: true
+  encryption_at_rest: true
+  backup_enabled: true
+  vulnerability_scanning: "weekly"
+  compliance_framework: "CIS"

@@ -1,0 +1,73 @@
+---
+# ===================================================================
+# UBUNTU PLATFORM CONFIGURATION
+# Settings specific to Ubuntu systems across all roles
+# ===================================================================
+
+# Ubuntu Package Management
+ubuntu_package_manager: apt
+ubuntu_update_cache: true
+ubuntu_upgrade_packages: false  # Controlled upgrades
+
+# Ubuntu Security Configuration
+ubuntu_security:
+  unattended_upgrades: false     # Manual updates for learning
+  automatic_reboots: false
+  security_updates_only: true
+  
+# Ubuntu System Configuration
+ubuntu_system:
+  timezone: "UTC"
+  locale: "en_US.UTF-8"
+  keyboard_layout: "us"
+  
+# Ubuntu Network Configuration
+ubuntu_network:
+  netplan_renderer: "networkd"
+  dns_search_domains: 
+    - "lab.servers.lan"    # Lab AD domain
+    - "servers.lan"        # Main server domain
+    - "infra.lan"          # Infrastructure domain
+  
+# Ubuntu Services
+ubuntu_services:
+  enabled:
+    - ssh
+    - systemd-timesyncd
+    - fail2ban
+    - ufw
+  disabled:
+    - snapd  # Disable snap for consistency
+
+# Ubuntu Firewall (UFW) Defaults
+ubuntu_ufw:
+  default_policy_incoming: "deny"
+  default_policy_outgoing: "allow"
+  default_policy_forward: "deny"
+  logging: "on"
+
+# Ubuntu SSH Configuration  
+ubuntu_ssh:
+  port: 22
+  protocol: 2
+  permit_root_login: false
+  password_authentication: false
+  pubkey_authentication: true
+  x11_forwarding: false
+  max_auth_tries: 3
+  client_alive_interval: 300
+  client_alive_count_max: 2
+
+# Ubuntu Resource Monitoring
+ubuntu_monitoring:
+  disk_usage_threshold: 85
+  memory_usage_threshold: 90
+  load_average_threshold: 2.0
+  
+# Ubuntu Log Configuration
+ubuntu_logging:
+  rsyslog_remote: true
+  rsyslog_server: "{{ lab_hosts['siem-01'] }}"  # siem-01
+  log_rotation: "weekly"
+  log_retention: "4 weeks"
+

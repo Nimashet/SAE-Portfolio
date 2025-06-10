@@ -1,0 +1,58 @@
+---
+# ===================================================================
+# MANAGEMENT NETWORK CONFIGURATION
+# Network-specific settings for management network hosts
+# ===================================================================
+
+# Network Identity
+network_name: "servers"           # Updated to match your VLAN naming
+network_zone: "trusted"
+network_vlan: 3                   # Servers VLAN ID
+
+# Network Security
+network_security:
+  firewall_zone: "internal"
+  ssh_allowed_from: 
+    - ""{{ lab_networks.management.subnet }}""    # Servers VLAN (same network)
+    - ""{{ lab_networks.management.subnet }}""    # Home VLAN (your workstation)
+    - ""{{ lab_networks.management.subnet }}""    # Infrastructure VLAN (Pi-hole access)
+  
+  # Network monitoring
+  packet_inspection: false   # No deep packet inspection in lab
+  bandwidth_monitoring: true
+  connection_logging: true
+
+# Network Services
+network_services:
+  dhcp_enabled: false        # Static IPs in servers network
+  dns_enabled: true
+  ntp_servers:
+    - "{{ lab_hosts['ws22-dc-01'] }}"         # dc-01 as primary time source
+    - "{{ dns_servers.pihole_cluster }}"         # Pi-hole cluster as backup NTP
+    
+# Network Monitoring
+network_monitoring:
+  snmp_enabled: false        # No SNMP monitoring in lab
+  netflow_enabled: false     # No NetFlow in lab
+  basic_monitoring: true     # Ping/connectivity monitoring
+  
+# Network Quality of Service
+network_qos:
+  automation_priority: "high"    # Ansible traffic priority
+  management_priority: "high"    # SSH/RDP traffic priority
+  bulk_priority: "normal"        # File transfers
+  
+# Network Backup
+network_backup:
+  config_backup_enabled: true
+  config_backup_frequency: "weekly"
+  config_backup_retention: 4
+
+# VLAN Integration Notes
+# This configuration applies to hosts in the Servers VLAN (ID 3)
+# Aligned with your network structure:
+# - "{{ lab_networks.management.subnet }}" Servers VLAN - Proxmox hosts and production VMs
+# - "{{ lab_networks.management.subnet }}" Home VLAN - Personal devices including workstations
+# - "{{ lab_networks.management.subnet }}" Infrastructure VLAN - Pi-hole cluster and network services
+
+

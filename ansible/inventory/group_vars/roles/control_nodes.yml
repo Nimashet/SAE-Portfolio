@@ -1,0 +1,62 @@
+---
+# ===================================================================
+# CONTROL NODES CONFIGURATION  
+# Systems that execute automation (Ansible controllers)
+# ===================================================================
+
+# SSH Configuration for Control Nodes
+ansible_ssh_private_key_file: "~/.ssh/sae_lab"
+ansible_user: ansible
+
+# Control Node Software Stack
+control_node_packages:
+  # Core Automation Tools
+  - ansible
+  - ansible-lint
+  - terraform
+  - git
+  
+  # Cloud CLIs
+  - awscli
+  - azure-cli
+  
+  # Development Tools
+  - python3
+  - python3-pip
+  - python3-venv
+  - curl
+  - wget
+  - jq
+  - yq
+  
+  # Security Tools
+  - ssh-audit
+  - lynis
+
+# Control Node Services
+control_node_services:
+  - ssh
+  - fail2ban
+
+# Control Node Resource Allocation
+control_node_resources:
+  min_cpu_cores: 4
+  min_memory_gb: 8
+  min_disk_gb: 120
+  
+# Automation Directories
+automation_directories:
+  - /opt/automation
+  - /opt/automation/playbooks
+  - /opt/automation/inventory
+  - /opt/automation/roles
+  - /opt/automation/scripts
+  - /var/log/automation
+
+# Control Node Security
+control_security:
+  ssh_key_type: "ed25519"
+  sudo_nopasswd: true
+  fail2ban_enabled: true
+  ufw_enabled: true
+  automated_updates: false  # Manual control for automation hosts
