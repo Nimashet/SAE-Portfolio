@@ -58,10 +58,6 @@ I'm working on automation that I'd actually want to use:
 - Building deployment processes that work the same way twice
 - Learning to write automation that doesn't require a PhD to maintain
 
-## Contact
-
-Looking for Security Automation Engineer roles where I can put this experience to work solving real problems.
-
 ---
 
 *This portfolio shows actual automation I'm building, not theoretical examples. Everything here runs in my lab and solves problems I've personally dealt with.*
