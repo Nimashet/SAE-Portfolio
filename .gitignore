@@ -1,34 +1,40 @@
-# Secrets and credentials
+# ===================================================================
+# SECURITY AUTOMATION ENGINEER .GITIGNORE
+# Comprehensive exclusions for automation development
+# ===================================================================
+
+# ===================================================================
+# SECRETS AND CREDENTIALS
+# ===================================================================
 *.pem
 *.key
+*.p12
+*.pfx
 .env
+.env.*
 secrets/
 credentials/
 vault_pass.txt
+**/credentials.*
+**/private_*
+**/secret_*
 
-# Terraform
-*.tfstate
-*.tfstate.*
-.terraform/
-.terraform.lock.hcl
+# SSH Configuration
+ssh_config*
+**/ssh_config*
+connection_secrets*
+known_hosts*
 
-# Ansible
-*.retry
-
-# OS generated files
-.DS_Store
-Thumbs.db
-
-# IDE files
-.vscode/settings.json
-.idea/
-
-# Logs
-*.log
+# Cloud Provider Credentials
+**/aws_credentials
+**/azure_credentials
+**/gcp_credentials
+.aws/
+.azure/
+.gcloud/
 
 # ===================================================================
-# ENTERPRISE ANSIBLE SECURITY EXCLUSIONS
-# Added during SAE enterprise inventory implementation
+# ANSIBLE SECURITY EXCLUSIONS
 # ===================================================================
 
 # Environment-specific configurations (contain IP addresses and secrets)
@@ -50,30 +56,154 @@ ansible/inventory/host_vars/
 **/secrets_*.yml
 **/encrypted_*.yml
 
-# SSH and connection configuration
-ssh_config*
-**/ssh_config*
-connection_secrets*
-
-# Cloud provider credentials
-**/aws_credentials
-**/azure_credentials
-**/gcp_credentials
+# Ansible execution artifacts
+*.retry
+ansible.log
+**/ansible.log
+**/automation_*.log
+**/tmp_*
+**/.ansible_async*
+**/retry_files*
 
 # Dynamic inventory scripts with embedded credentials
 **/dynamic_inventory_*.py
 **/inventory_*.json
 
-# Terraform state that might contain IP addresses
-**/terraform.tfstate*
-**/terraform.tfvars*
+# ===================================================================
+# TERRAFORM EXCLUSIONS
+# ===================================================================
+*.tfstate
+*.tfstate.*
+*.tfvars
+.terraform/
+.terraform.lock.hcl
+terraform.tfplan
+terraform.tfplan.*
 
-# Ansible log files that might contain sensitive data
-ansible.log
-**/ansible.log
-**/automation_*.log
+# Terraform provider credentials
+terraform.rc
+.terraformrc
 
-# Temporary files from ansible execution
-**/tmp_*
-**/.ansible_async*
-**/retry_files*
+# ===================================================================
+# DEVELOPMENT ARTIFACTS
+# ===================================================================
+
+# IDE and Editor Files
+.vscode/settings.json
+.vscode/launch.json
+.idea/
+*.sublime-*
+*.swp
+*.swo
+*~
+
+# OS Generated Files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+desktop.ini
+*.lnk
+
+# Backup Files
+*.bak
+*.backup
+*.orig
+*.tmp
+
+# Log Files
+*.log
+logs/
+log/
+
+# ===================================================================
+# PERSONAL AND PROGRESS TRACKING
+# ===================================================================
+PROGRESS.md
+**/progress.md
+**/*progress*
+**/notes.md
+**/todo.md
+**/learning_*
+
+# Personal lab documentation with sensitive info
+lab_setup.md
+network_diagram.*
+**/lab_*
+**/personal_*
+
+# ===================================================================
+# LANGUAGE AND FRAMEWORK SPECIFIC
+# ===================================================================
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+ENV/
+.venv/
+
+# Node.js
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Ruby
+*.gem
+.bundle/
+vendor/
+
+# Go
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# ===================================================================
+# CONTAINER AND VIRTUALIZATION
+# ===================================================================
+
+# Docker
+.dockerignore
+Dockerfile.local
+docker-compose.override.yml
+.docker/
+
+# Vagrant
+.vagrant/
+*.box
+
+# ===================================================================
+# CLOUD AND DEPLOYMENT ARTIFACTS
+# ===================================================================
+
+# Kubernetes
+*.kubeconfig
+kubeconfig*
+**/k8s-secrets*
+
+# Helm
+*.tgz
+
+# CI/CD
+.github/workflows/secrets.yml
+.gitlab-ci-local.yml
+
+# ===================================================================
+# TEMPORARY AND CACHE FILES
+# ===================================================================
+*.cache
+.cache/
+tmp/
+temp/
+.tmp/
+.temp/
