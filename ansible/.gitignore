@@ -1,0 +1,12 @@
+# Ansible Runtime Files
+logs/
+*.retry
+vault/.vault_pass
+.vault_pass
+
+# Ansible Cache
+.ansible/
+
+# Temporary Files
+*.tmp
+*.temp
