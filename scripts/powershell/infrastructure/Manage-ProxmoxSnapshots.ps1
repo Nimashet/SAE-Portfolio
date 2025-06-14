@@ -34,8 +34,11 @@
 .PARAMETER DryRun
     Show what would be done without making changes
 
-.PARAMETER Force
-    Skip confirmation prompts
+.PARAMETER PowerOff
+    Power off VMs before creating snapshots (for maximum consistency)
+
+.PARAMETER WaitTime
+    Seconds to wait after shutdown before snapshot (default: 30)
 
 .EXAMPLE
     .\Manage-ProxmoxSnapshots.ps1 -Action Create -VMGroup Linux
@@ -50,8 +53,8 @@
     List all snapshots across all VMs
 
 .EXAMPLE
-    .\Manage-ProxmoxSnapshots.ps1 -Action Cleanup -MaxAge 7 -DryRun
-    Show old snapshots that would be deleted
+    .\Manage-ProxmoxSnapshots.ps1 -Action Create -VMGroup Linux -PowerOff
+    Create consistent snapshots by powering off VMs first
 
 .NOTES
     - Requires SSH access to Proxmox host
@@ -77,6 +80,10 @@ param(
     [int]$MaxAge = 7,
     
     [switch]$DryRun,
+    
+    [switch]$PowerOff,
+    
+    [int]$WaitTime = 30,
     
     [switch]$Force
 )
@@ -205,37 +212,124 @@ function New-VMSnapshot {
         $SnapName = "snapshot-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
     }
     
-    Write-Status "Creating snapshots with name: $SnapName"
+    if ($PowerOff) {
+        Write-Status "Creating consistent snapshots (VMs will be powered off temporarily)"
+        Write-Status "Snapshot name: $SnapName"
+    } else {
+        Write-Status "Creating live snapshots (VMs remain running)"
+        Write-Status "Snapshot name: $SnapName"
+    }
     
     $successful = 0
     $failed = 0
+    $vmStates = @{}
     
-    foreach ($vmid in $VMIDs) {
-        $vmName = $VMNames[$vmid]
-        Write-Host "  Creating snapshot for VM $vmid ($vmName)... " -NoNewline
-        
-        if ($DryRun) {
-            Write-Host "WOULD CREATE" -ForegroundColor Yellow
-            continue
+    try {
+        if ($PowerOff) {
+            # Phase 1: Power off VMs and record their states
+            Write-Status "Phase 1: Powering off VMs..."
+            foreach ($vmid in $VMIDs) {
+                $vmName = $VMNames[$vmid]
+                
+                # Check current state
+                try {
+                    $status = ssh $ProxmoxHost "qm status $vmid" 2>$null
+                    $isRunning = $status -like "*running*"
+                    $vmStates[$vmid] = $isRunning
+                    
+                    if ($isRunning) {
+                        Write-Host "  Shutting down VM $vmid ($vmName)... " -NoNewline
+                        
+                        if (!$DryRun) {
+                            ssh $ProxmoxHost "qm shutdown $vmid" 2>$null | Out-Null
+                            Write-Host "INITIATED" -ForegroundColor Yellow
+                        } else {
+                            Write-Host "WOULD SHUTDOWN" -ForegroundColor Yellow
+                        }
+                    } else {
+                        Write-Status "  VM $vmid ($vmName) already stopped"
+                    }
+                } catch {
+                    Write-Status "  Failed to check/shutdown VM $vmid" "ERROR"
+                    $vmStates[$vmid] = $false
+                }
+            }
+            
+            if (!$DryRun) {
+                # Wait for VMs to shut down
+                Write-Status "Waiting $WaitTime seconds for clean shutdown..."
+                Start-Sleep -Seconds $WaitTime
+                
+                # Verify shutdown
+                Write-Status "Verifying VM shutdown status..."
+                foreach ($vmid in $VMIDs) {
+                    $vmName = $VMNames[$vmid]
+                    $status = ssh $ProxmoxHost "qm status $vmid" 2>$null
+                    if ($status -like "*stopped*") {
+                        Write-Status "  VM $vmid ($vmName): Stopped" "SUCCESS"
+                    } else {
+                        Write-Status "  VM $vmid ($vmName): Still running - forcing stop" "WARNING"
+                        ssh $ProxmoxHost "qm stop $vmid" 2>$null | Out-Null
+                    }
+                }
+            }
         }
         
-        try {
-            $result = ssh $ProxmoxHost "qm snapshot $vmid $SnapName" 2>&1
-            if ($LASTEXITCODE -eq 0) {
-                Write-Host "SUCCESS" -ForegroundColor Green
-                $successful++
-            } else {
+        # Phase 2: Create snapshots
+        Write-Status "Phase 2: Creating snapshots..."
+        foreach ($vmid in $VMIDs) {
+            $vmName = $VMNames[$vmid]
+            Write-Host "  Creating snapshot for VM $vmid ($vmName)... " -NoNewline
+            
+            if ($DryRun) {
+                Write-Host "WOULD CREATE" -ForegroundColor Yellow
+                continue
+            }
+            
+            try {
+                $result = ssh $ProxmoxHost "qm snapshot $vmid $SnapName" 2>&1
+                if ($LASTEXITCODE -eq 0) {
+                    Write-Host "SUCCESS" -ForegroundColor Green
+                    $successful++
+                } else {
+                    Write-Host "FAILED" -ForegroundColor Red
+                    Write-Status "  Error: $result" "ERROR"
+                    $failed++
+                }
+            } catch {
                 Write-Host "FAILED" -ForegroundColor Red
-                Write-Status "  Error: $result" "ERROR"
                 $failed++
             }
-        } catch {
-            Write-Host "FAILED" -ForegroundColor Red
-            $failed++
+        }
+        
+    } finally {
+        # Phase 3: Restart VMs if they were running before
+        if ($PowerOff -and !$DryRun) {
+            Write-Status "Phase 3: Restarting VMs that were originally running..."
+            foreach ($vmid in $VMIDs) {
+                $vmName = $VMNames[$vmid]
+                $wasRunning = $vmStates[$vmid]
+                
+                if ($wasRunning) {
+                    Write-Host "  Starting VM $vmid ($vmName)... " -NoNewline
+                    try {
+                        ssh $ProxmoxHost "qm start $vmid" 2>$null | Out-Null
+                        Write-Host "SUCCESS" -ForegroundColor Green
+                    } catch {
+                        Write-Host "FAILED" -ForegroundColor Red
+                        Write-Status "  Manual start required for VM $vmid" "ERROR"
+                    }
+                }
+            }
         }
     }
     
     Write-Status "Snapshot creation complete: $successful successful, $failed failed"
+    
+    if ($PowerOff -and !$DryRun) {
+        Write-Status "All VMs have been restarted to their original state"
+    }
+    
     return ($failed -eq 0)
 }
 
