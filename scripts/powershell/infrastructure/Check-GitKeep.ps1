@@ -1,114 +1,165 @@
 <#
-	# Check for missing .gitkeep files
-	.\check-gitkeep.ps1
+.SYNOPSIS
+    Check and manage .gitkeep files in SAE Portfolio
 
-	# Check with verbose output (shows all directories)
-	.\check-gitkeep.ps1 -Verbose
+.DESCRIPTION
+    Validates .gitkeep files for proper git synchronization to remote dev containers.
+    Uses conservative approach - only manages files in safe structural directories.
+    
+    SECURITY NOTE: This script will NOT auto-create .gitkeep files in directories
+    that might contain sensitive data (secrets, credentials, logs, etc.)
 
-	# Automatically create missing .gitkeep files
-	.\check-gitkeep.ps1 -CreateMissing
+.PARAMETER CreateMissing
+    Auto-create missing .gitkeep files in safe directories
 
-	# Check a specific directory
-	.\check-gitkeep.ps1 -Path "C:\Dev\SAE-Portfolio"
+.PARAMETER Verbose
+    Show all found .gitkeep files, not just missing ones
 
-	# Create missing files in specific directory
-	.\check-gitkeep.ps1 -Path "C:\Dev\SAE-Portfolio" -CreateMissing
+.EXAMPLE
+    .\Check-GitKeep.ps1
+    Check for issues without making changes
+
+.EXAMPLE
+    .\Check-GitKeep.ps1 -CreateMissing
+    Create missing .gitkeep files in safe directories
+
+.EXAMPLE
+    .\Check-GitKeep.ps1 -Verbose
+    Show detailed output including all found files
+
+.NOTES
+    - Must run from C:\dev\sae-portfolio root directory
+    - Will NOT delete existing .gitkeep files (only warns about unsafe locations)
+    - Only creates .gitkeep in empty directories within safe structural areas
+    - Validates required .gitkeep files specified in .gitignore exceptions
+    
+    SAFE DIRECTORIES (auto-create allowed):
+    - scripts/, docs/, examples/
+    - terraform/modules/, ansible/playbooks/, ansible/roles/
+    
+    UNSAFE DIRECTORIES (warning only):
+    - secrets/, credentials/, vault/, keys/, logs/, backup/
+    - host_vars/, environments/, .git/, .vscode/, node_modules/
 #>
 
-# Check for directories missing .gitkeep files in SAE-Portfolio
 param(
-    [string]$Path = ".",
     [switch]$CreateMissing,
     [switch]$Verbose
 )
 
-# Function to check if directory should have .gitkeep
-function Should-HaveGitKeep {
-    param([System.IO.DirectoryInfo]$Directory)
-    
-    # Skip these directories (they typically have content or are meant to be empty)
-    $skipDirs = @(
-        '.git', 
-        'node_modules', 
-        '.vscode', 
-        '.devcontainer',
-        'inventory\backup',  # Has timestamped backups
-        'ansible\logs',      # Runtime logs, should be in .gitignore
-        'ansible\vault'      # May contain sensitive files
-    )
-    
-    $relativePath = $Directory.FullName.Replace((Get-Location).Path, "").TrimStart('\')
-    
-    # Skip if in exclude list
-    foreach ($skip in $skipDirs) {
-        if ($relativePath -like "*$skip*") {
-            return $false
-        }
-    }
-    
-    # Check if directory is empty or only contains subdirectories
-    $files = $Directory.GetFiles()
-    $hasOnlySubdirs = ($files.Count -eq 0) -and ($Directory.GetDirectories().Count -gt 0)
-    $isEmpty = ($files.Count -eq 0) -and ($Directory.GetDirectories().Count -eq 0)
-    
-    return $isEmpty -or $hasOnlySubdirs
+$ErrorActionPreference = 'Stop'
+
+# Must run from C:\dev\sae-portfolio
+if (!(Test-Path "ansible") -or !(Test-Path "scripts")) {
+    throw "Run this from C:\dev\sae-portfolio root directory"
 }
 
-# Main script
-Write-Host "🔍 Checking for missing .gitkeep files in SAE-Portfolio..." -ForegroundColor Cyan
-Write-Host "📂 Path: $(Resolve-Path $Path)" -ForegroundColor Gray
-Write-Host ""
+# Directories that should NEVER have auto-created .gitkeep (security risk)
+$UnsafeDirs = @(
+    'secrets', 'credentials', 'vault', 'keys', 'certs', 'ssl',
+    'logs', 'log', 'tmp', 'temp', 'backup',
+    'host_vars', 'environments',
+    '.git', '.vscode', '.idea', 'node_modules'
+)
 
-$missingGitKeep = @()
-$totalChecked = 0
+# Required .gitkeep files (from .gitignore negations)
+$RequiredGitKeep = @(
+    'ansible\inventory\group_vars\environments\.gitkeep',
+    'ansible\inventory\host_vars\.gitkeep'
+)
+
+# Safe structural directories where we can auto-create .gitkeep
+$SafeDirs = @(
+    'scripts', 'docs', 'examples', 'terraform\modules',
+    'ansible\playbooks', 'ansible\roles'
+)
+
+Write-Host "Checking .gitkeep files in SAE Portfolio..." -ForegroundColor Green
+
+$issues = 0
 $created = 0
 
-# Get all directories recursively
-Get-ChildItem -Path $Path -Directory -Recurse | ForEach-Object {
-    $dir = $_
-    $totalChecked++
-    
-    if (Should-HaveGitKeep -Directory $dir) {
-        $gitkeepPath = Join-Path $dir.FullName ".gitkeep"
-        $relativePath = $dir.FullName.Replace((Get-Location).Path, "").TrimStart('\')
-        
-        if (-not (Test-Path $gitkeepPath)) {
-            $missingGitKeep += $relativePath
+# Check required .gitkeep files first
+Write-Host "`nValidating required .gitkeep files:" -ForegroundColor Yellow
+foreach ($required in $RequiredGitKeep) {
+    if (Test-Path $required) {
+        if ($Verbose) { Write-Host "  Found: $required" -ForegroundColor Green }
+    } else {
+        Write-Host "  MISSING: $required" -ForegroundColor Red
+        Write-Host "    This file is required by .gitignore exceptions" -ForegroundColor Gray
+        $issues++
+    }
+}
+
+# Check for .gitkeep in unsafe directories
+Write-Host "`nChecking for .gitkeep in potentially unsafe directories:" -ForegroundColor Yellow
+Get-ChildItem -Directory -Recurse | Where-Object {
+    $dirPath = $_.FullName.Replace((Get-Location).Path, '').TrimStart('\')
+    $unsafe = $false
+    foreach ($unsafePattern in $UnsafeDirs) {
+        if ($dirPath -like "*$unsafePattern*") {
+            $unsafe = $true
+            break
+        }
+    }
+    $unsafe -and (Test-Path (Join-Path $_.FullName '.gitkeep'))
+} | ForEach-Object {
+    $relativePath = $_.FullName.Replace((Get-Location).Path, '').TrimStart('\')
+    Write-Host "  WARNING: $relativePath\.gitkeep" -ForegroundColor Red
+    Write-Host "    This directory might contain sensitive data" -ForegroundColor Gray
+    $issues++
+}
+
+# Find empty directories in safe areas
+Write-Host "`nChecking safe structural directories:" -ForegroundColor Yellow
+foreach ($safeDir in $SafeDirs) {
+    if (Test-Path $safeDir) {
+        Get-ChildItem -Path $safeDir -Directory -Recurse | Where-Object {
+            # Check if directory is completely empty
+            $files = $_.GetFiles()
+            $subdirs = $_.GetDirectories()
+            ($files.Count -eq 0 -and $subdirs.Count -eq 0)
+        } | ForEach-Object {
+            $gitkeepPath = Join-Path $_.FullName '.gitkeep'
+            $relativePath = $_.FullName.Replace((Get-Location).Path, '').TrimStart('\')
             
-            if ($CreateMissing) {
-                New-Item -Path $gitkeepPath -ItemType File -Force | Out-Null
-                Write-Host "✅ Created: $relativePath\.gitkeep" -ForegroundColor Green
-                $created++
+            if (Test-Path $gitkeepPath) {
+                if ($Verbose) { Write-Host "  Found: $relativePath\.gitkeep" -ForegroundColor Green }
             } else {
-                Write-Host "❌ Missing: $relativePath\.gitkeep" -ForegroundColor Red
+                if ($CreateMissing) {
+                    try {
+                        New-Item -Path $gitkeepPath -ItemType File | Out-Null
+                        Write-Host "  Created: $relativePath\.gitkeep" -ForegroundColor Green
+                        $created++
+                    } catch {
+                        Write-Host "  Failed to create: $relativePath\.gitkeep" -ForegroundColor Red
+                        $issues++
+                    }
+                } else {
+                    Write-Host "  Missing: $relativePath\.gitkeep" -ForegroundColor Yellow
+                    $issues++
+                }
             }
-        } elseif ($Verbose) {
-            Write-Host "✅ Found: $relativePath\.gitkeep" -ForegroundColor Green
         }
     }
 }
 
 # Summary
-Write-Host ""
-Write-Host "📊 Summary:" -ForegroundColor Cyan
-Write-Host "   Directories checked: $totalChecked" -ForegroundColor Gray
-Write-Host "   Missing .gitkeep files: $($missingGitKeep.Count)" -ForegroundColor $(if ($missingGitKeep.Count -eq 0) { "Green" } else { "Yellow" })
-
-if ($CreateMissing -and $created -gt 0) {
-    Write-Host "   Files created: $created" -ForegroundColor Green
-    Write-Host ""
-    Write-Host "💡 Don't forget to commit the new .gitkeep files:" -ForegroundColor Yellow
-    Write-Host "   git add ." -ForegroundColor Gray
-    Write-Host "   git commit -m 'Add missing .gitkeep files'" -ForegroundColor Gray
+Write-Host "`nSummary:" -ForegroundColor Cyan
+if ($issues -eq 0) {
+    Write-Host "  All .gitkeep files are properly managed" -ForegroundColor Green
+} else {
+    Write-Host "  Issues found: $issues" -ForegroundColor Yellow
 }
 
-if ($missingGitKeep.Count -gt 0 -and -not $CreateMissing) {
-    Write-Host ""
-    Write-Host "💡 To create missing .gitkeep files automatically:" -ForegroundColor Yellow
-    Write-Host "   .\check-gitkeep.ps1 -CreateMissing" -ForegroundColor Gray
+if ($created -gt 0) {
+    Write-Host "  Files created: $created" -ForegroundColor Green
+    Write-Host "`nNext steps:" -ForegroundColor Yellow
+    Write-Host "  git add ."
+    Write-Host "  git commit -m 'Add missing .gitkeep files'"
 }
 
-if ($missingGitKeep.Count -eq 0) {
-    Write-Host ""
-    Write-Host "🎉 All directories have appropriate .gitkeep files!" -ForegroundColor Green
+if ($issues -gt 0 -and !$CreateMissing) {
+    Write-Host "`nTo auto-create missing .gitkeep files:" -ForegroundColor Yellow
+    Write-Host "  .\Check-GitKeep.ps1 -CreateMissing"
 }
