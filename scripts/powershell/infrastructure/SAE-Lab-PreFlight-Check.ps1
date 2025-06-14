@@ -6,26 +6,17 @@
     Pre-flight checklist for SAE Lab security hardening deployment
 
 .DESCRIPTION
-    Performs comprehensive pre-deployment checks:
+    Performs connectivity and prerequisite checks before SAE Lab deployments:
     - SSH connectivity testing to all target systems
-    - Proxmox snapshot creation for rollback capability
     - Verification of required scripts and dependencies
-    - System health checks before hardening
+    - Basic system health checks
+    - Pre-deployment validation
 
 .PARAMETER TargetSystems
-    Array of target system names (matches Deploy-SecurityHardening.ps1)
+    Array of target system names for connectivity testing
 
-.PARAMETER ProxmoxHost
-    Proxmox host IP address for snapshot management
-
-.PARAMETER ProxmoxUser
-    Proxmox username for SSH access (default: root)
-
-.PARAMETER SkipSnapshots
-    Skip automatic snapshot creation (not recommended)
-
-.PARAMETER TestOnly
-    Only run connectivity tests, skip snapshot creation
+.PARAMETER SkipHealthCheck
+    Skip basic health checks on target systems
 
 .EXAMPLE
     .\SAE-Lab-PreFlight-Check.ps1
@@ -40,32 +31,22 @@
     Specify Proxmox host for snapshots
 
 .NOTES
-    - Run from Windows desktop before Deploy-SecurityHardening.ps1
-    - Requires SSH access to Proxmox host for snapshots
-    - Creates timestamped snapshots for easy identification
+    - Run from Windows desktop before deployment scripts
+    - Requires SSH connectivity to target systems
+    - Validates environment readiness for automation
+    - Use Manage-ProxmoxSnapshots.ps1 for backup operations
     - Place in: C:\dev\sae-portfolio\scripts\powershell\infrastructure\
 #>
 
 param(
     [string[]]$TargetSystems = @("control", "git", "docker", "siem", "ub24-tgt-01", "rl9-tgt-01", "ub20-tgt-01"),
-    [string]$ProxmoxHost = "pve1",
-    [string]$ProxmoxUser = "root",
-    [switch]$SkipSnapshots,
-    [switch]$TestOnly
+    [switch]$SkipHealthCheck
 )
 
 $ErrorActionPreference = 'Stop'
 
-# VM ID mapping based on your Proxmox datacenter
-$VMMapping = @{
-    "control" = 5001
-    "git" = 5002
-    "docker" = 5003
-    "siem" = 5005
-    "ub24-tgt-01" = 5007
-    "rl9-tgt-01" = 5008
-    "ub20-tgt-01" = 5009
-}
+# Remove VM mapping and snapshot-related variables
+# Pre-flight focuses on connectivity testing only
 
 function Write-Status {
     param([string]$Message, [string]$Level = "INFO")
@@ -153,78 +134,15 @@ function Test-SSHConnectivity {
     return $true
 }
 
-function Test-ProxmoxConnectivity {
-    if ($SkipSnapshots -or $TestOnly) {
-        return $true
-    }
-    
-    Write-Status "Testing Proxmox connectivity..." "INFO"
-    
-    try {
-        $result = ssh -o ConnectTimeout=10 $ProxmoxUser@$ProxmoxHost "pveversion" 2>$null
-        if ($result -like "*pve-manager*") {
-            Write-Status "Proxmox connectivity confirmed" "SUCCESS"
-            return $true
-        } else {
-            Write-Status "Proxmox connection failed - cannot create snapshots" "WARNING"
-            return $false
-        }
-    } catch {
-        Write-Status "Cannot connect to Proxmox host $ProxmoxHost" "WARNING"
-        Write-Status "Snapshots will be skipped - manual backup recommended" "WARNING"
-        return $false
-    }
-}
-
-function New-SystemSnapshots {
-    if ($SkipSnapshots -or $TestOnly) {
-        Write-Status "Snapshot creation skipped" "INFO"
-        return $true
-    }
-    
-    Write-Status "Creating VM snapshots..." "INFO"
-    
-    $snapshotName = "pre-hardening-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
-    $failedSnapshots = @()
-    $successfulSnapshots = @()
-    
-    foreach ($system in $TargetSystems) {
-        if ($VMMapping.ContainsKey($system)) {
-            $vmid = $VMMapping[$system]
-            Write-Host "  Creating snapshot for $system (VM $vmid)... " -NoNewline
-            
-            try {
-                $result = ssh $ProxmoxUser@$ProxmoxHost "qm snapshot $vmid $snapshotName" 2>$null
-                if ($LASTEXITCODE -eq 0) {
-                    Write-Host "SUCCESS" -ForegroundColor Green
-                    $successfulSnapshots += $system
-                } else {
-                    Write-Host "FAILED" -ForegroundColor Red
-                    $failedSnapshots += $system
-                }
-            } catch {
-                Write-Host "FAILED" -ForegroundColor Red
-                $failedSnapshots += $system
-            }
-        } else {
-            Write-Status "  Unknown VM ID for $system - skipping snapshot" "WARNING"
-            $failedSnapshots += $system
-        }
-    }
-    
-    Write-Status "Snapshot creation results:" "INFO"
-    Write-Status "  Successful: $($successfulSnapshots.Count)/$($TargetSystems.Count) snapshots" "SUCCESS"
-    
-    if ($failedSnapshots.Count -gt 0) {
-        Write-Status "  Failed snapshots: $($failedSnapshots -join ', ')" "WARNING"
-        Write-Status "Consider manual snapshots for failed systems" "WARNING"
-    }
-    
-    Write-Status "Snapshot name: $snapshotName" "INFO"
-    return $true
-}
+# Remove Proxmox connectivity and snapshot functions
+# Use Manage-ProxmoxSnapshots.ps1 for backup operations
 
 function Get-SystemHealthCheck {
+    if ($SkipHealthCheck) {
+        Write-Status "Health check skipped" "INFO"
+        return
+    }
+    
     Write-Status "Performing basic system health checks..." "INFO"
     
     $healthIssues = @()
@@ -267,22 +185,15 @@ function Show-PreFlightSummary {
     Write-Status "=== PRE-FLIGHT CHECK SUMMARY ===" "INFO"
     Write-Host ""
     Write-Host "Target Systems: $($TargetSystems -join ', ')"
-    Write-Host "Proxmox Host: $ProxmoxHost"
     Write-Host "Timestamp: $(Get-Date)"
     Write-Host ""
     
-    if ($TestOnly) {
-        Write-Status "TEST MODE: Connectivity verified, ready for hardening" "SUCCESS"
-    } elseif ($SkipSnapshots) {
-        Write-Status "SNAPSHOTS SKIPPED: Manual backup recommended" "WARNING"
-    } else {
-        Write-Status "SNAPSHOTS CREATED: Safe to proceed with hardening" "SUCCESS"
-    }
+    Write-Status "CONNECTIVITY VERIFIED: Ready for deployment" "SUCCESS"
     
     Write-Host ""
     Write-Host "Next steps:"
-    Write-Host "1. Review any warnings above"
-    Write-Host "2. Run: .\Deploy-SecurityHardening.ps1"
+    Write-Host "1. Create snapshots: .\Manage-ProxmoxSnapshots.ps1 -Action Create -VMGroup Linux"
+    Write-Host "2. Run deployment: .\Deploy-SecurityHardening.ps1"
     Write-Host "3. If issues occur, restore from snapshots"
     Write-Host ""
 }
@@ -297,10 +208,8 @@ $allChecksPass = $true
 
 $allChecksPass = Test-Prerequisites -and $allChecksPass
 $allChecksPass = Test-SSHConnectivity -and $allChecksPass
-$allChecksPass = Test-ProxmoxConnectivity -and $allChecksPass
 
 if ($allChecksPass) {
-    New-SystemSnapshots | Out-Null
     Get-SystemHealthCheck
     Show-PreFlightSummary
     
@@ -308,6 +217,6 @@ if ($allChecksPass) {
     exit 0
 } else {
     Write-Status "PRE-FLIGHT CHECK FAILED - DO NOT PROCEED" "ERROR"
-    Write-Host "Fix the issues above before running Deploy-SecurityHardening.ps1"
+    Write-Host "Fix the issues above before running deployment scripts"
     exit 1
 }
