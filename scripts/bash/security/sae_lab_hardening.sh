@@ -1,98 +1,155 @@
 #!/bin/bash
 
+# File: sae_lab_hardening.sh
 # SAE Lab Server Hardening Script
-# Based on SAE Lab VM Setup SOP
+# Establishes security baseline before application deployment
 # Usage: ./sae_lab_hardening.sh [hostname]
 
 set -euo pipefail
 
-# Colors for output
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-NC='\033[0m' # No Color
-
-# Logging
-LOG_FILE="/var/log/sae_hardening.log"
-TIMESTAMP=$(date '+%Y-%m-%d %H:%M:%S')
-
-log_message() {
-    echo -e "${GREEN}[${TIMESTAMP}]${NC} $1"
-    echo "[${TIMESTAMP}] $1" | sudo tee -a "${LOG_FILE}" > /dev/null
+# Basic logging
+log() {
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1"
 }
 
-error_message() {
-    echo -e "${RED}[ERROR]${NC} $1"
-    echo "[${TIMESTAMP}] ERROR: $1" | sudo tee -a "${LOG_FILE}" > /dev/null
+error() {
+    echo "[ERROR] $1" >&2
 }
 
-warning_message() {
-    echo -e "${YELLOW}[WARNING]${NC} $1"
-    echo "[${TIMESTAMP}] WARNING: $1" | sudo tee -a "${LOG_FILE}" > /dev/null
-}
-
-# Check if running as root
+# Check if running as non-root user
 if [[ $EUID -eq 0 ]]; then
-   error_message "This script should not be run as root. Run as labrat or automation user with sudo."
+   error "Run as labrat or automation user with sudo, not root"
    exit 1
 fi
 
 HOSTNAME=${1:-$(hostname)}
-log_message "Starting SAE Lab hardening for ${HOSTNAME}"
+log "Starting SAE Lab hardening for $HOSTNAME"
 
-# Function to backup configuration files
-backup_config() {
-    local config_file=$1
-    if [[ -f "${config_file}" ]]; then
-        sudo cp "${config_file}" "${config_file}.backup.$(date +%Y%m%d-%H%M%S)" 
-        log_message "Backed up ${config_file}"
+# Verify and create automation users
+setup_users() {
+    log "Setting up automation users..."
+    
+    # Create automation user if missing
+    if ! id "automation" &>/dev/null; then
+        sudo useradd -m -s /bin/bash automation
+        log "Created automation user"
+    else
+        log "automation user exists"
     fi
+    
+    # Configure passwordless sudo for required users
+    local users=("labrat" "automation")
+    
+    # Add ansible user only on control node
+    if [[ "$HOSTNAME" == *"control"* ]]; then
+        if ! id "ansible" &>/dev/null; then
+            sudo useradd -m -s /bin/bash ansible
+            log "Created ansible user"
+        fi
+        users+=("ansible")
+    fi
+    
+    # Configure sudo for each user
+    for user in "${users[@]}"; do
+        if id "$user" &>/dev/null; then
+            echo "$user ALL=(ALL) NOPASSWD:ALL" | sudo tee "/etc/sudoers.d/$user" > /dev/null
+            sudo chmod 440 "/etc/sudoers.d/$user"
+            log "Configured passwordless sudo for $user"
+        fi
+    done
 }
 
-# Function to configure SSH security
-configure_ssh_security() {
-    log_message "Configuring SSH security settings..."
+# Configure SSH security
+configure_ssh() {
+    log "Configuring SSH security..."
     
-    # Backup original SSH config
-    backup_config "/etc/ssh/sshd_config"
+    # Backup original config
+    if [[ -f /etc/ssh/sshd_config ]] && [[ ! -f /etc/ssh/sshd_config.backup ]]; then
+        sudo cp /etc/ssh/sshd_config /etc/ssh/sshd_config.backup
+    fi
     
-    # Create SSH security configuration
+    # Create security configuration
     sudo tee /etc/ssh/sshd_config.d/sae-security.conf > /dev/null <<EOF
 # SAE Lab Security Configuration
 PasswordAuthentication no
 PermitRootLogin no
 PubkeyAuthentication yes
-AuthorizedKeysFile .ssh/authorized_keys
 MaxAuthTries 3
 ClientAliveInterval 300
 ClientAliveCountMax 2
 X11Forwarding no
-AllowTcpForwarding no
 PermitEmptyPasswords no
-Protocol 2
 EOF
 
-    # Test SSH configuration
+    # Test and restart SSH
     if sudo sshd -t; then
-        log_message "SSH configuration syntax is valid"
         sudo systemctl restart sshd
-        log_message "SSH service restarted with new configuration"
+        log "SSH security configured and restarted"
     else
-        error_message "SSH configuration has syntax errors. Restoring backup."
-        sudo cp /etc/ssh/sshd_config.backup.* /etc/ssh/sshd_config
+        error "SSH configuration invalid, check syntax"
         exit 1
     fi
 }
 
-# Function to install and configure fail2ban
-configure_fail2ban() {
-    log_message "Installing and configuring fail2ban..."
+# Configure firewall
+configure_firewall() {
+    log "Configuring UFW firewall..."
     
-    # Install fail2ban
-    sudo apt update
-    sudo apt install -y fail2ban
+    # Install and reset firewall
+    sudo apt update -qq
+    sudo apt install -y ufw
+    sudo ufw --force reset
     
-    # Create fail2ban jail configuration for SSH
+    # Set defaults
+    sudo ufw default deny incoming
+    sudo ufw default allow outgoing
+    
+    # Always allow SSH
+    sudo ufw allow ssh
+    
+    # Configure role-specific ports
+    case "$HOSTNAME" in
+        *control*)
+            log "Firewall: Control node (SSH only)"
+            ;;
+        *git*)
+            log "Firewall: Git server (HTTP/HTTPS)"
+            sudo ufw allow 80/tcp
+            sudo ufw allow 443/tcp
+            ;;
+        *docker*)
+            log "Firewall: Docker server (Docker daemon)"
+            sudo ufw allow 2376/tcp
+            ;;
+        *siem*)
+            log "Firewall: SIEM server (Syslog)"
+            sudo ufw allow 514/tcp
+            sudo ufw allow 514/udp
+            ;;
+        *tgt*)
+            log "Firewall: Target system (SSH only)"
+            ;;
+        *)
+            log "Firewall: Unknown role (SSH only)"
+            ;;
+    esac
+    
+    # Enable firewall
+    sudo ufw --force enable
+    log "UFW firewall enabled"
+}
+
+# Install security essentials
+install_security_tools() {
+    log "Installing security tools..."
+    
+    sudo apt update -qq
+    sudo apt install -y \
+        fail2ban \
+        unattended-upgrades \
+        rsyslog
+    
+    # Configure fail2ban for SSH
     sudo tee /etc/fail2ban/jail.d/sae-ssh.conf > /dev/null <<EOF
 [sshd]
 enabled = true
@@ -104,209 +161,67 @@ bantime = 3600
 findtime = 600
 EOF
 
-    # Start and enable fail2ban
-    sudo systemctl enable fail2ban
-    sudo systemctl start fail2ban
-    log_message "fail2ban configured and started"
-}
-
-# Function to configure UFW firewall
-configure_firewall() {
-    log_message "Configuring UFW firewall..."
-    
-    # Install ufw if not present
-    sudo apt install -y ufw
-    
-    # Reset UFW to defaults
-    sudo ufw --force reset
-    
-    # Set default policies
-    sudo ufw default deny incoming
-    sudo ufw default allow outgoing
-    
-    # Allow SSH (critical - don't lock ourselves out)
-    sudo ufw allow ssh
-    
-    # Allow specific services based on server role
-    case "${HOSTNAME}" in
-        *control*)
-            log_message "Configuring firewall for control node"
-            # Control node may need additional ports for Ansible
-            ;;
-        *git*)
-            log_message "Configuring firewall for git server"
-            sudo ufw allow 80/tcp   # HTTP for GitLab
-            sudo ufw allow 443/tcp  # HTTPS for GitLab
-            ;;
-        *docker*)
-            log_message "Configuring firewall for docker server"
-            sudo ufw allow 2376/tcp # Docker daemon (secure)
-            ;;
-        *siem*)
-            log_message "Configuring firewall for SIEM server"
-            sudo ufw allow 514/tcp  # Syslog
-            sudo ufw allow 514/udp  # Syslog UDP
-            ;;
-        *)
-            log_message "Configuring firewall for target system"
-            # Target systems: minimal ports only
-            ;;
-    esac
-    
-    # Enable firewall
-    sudo ufw --force enable
-    log_message "UFW firewall configured and enabled"
-}
-
-# Function to configure system logging
-configure_logging() {
-    log_message "Configuring system logging..."
-    
-    # Install rsyslog if not present
-    sudo apt install -y rsyslog
-    
-    # Enable and start rsyslog
-    sudo systemctl enable rsyslog
-    sudo systemctl start rsyslog
-    
-    # Configure log rotation for security logs
-    sudo tee /etc/logrotate.d/sae-security > /dev/null <<EOF
-/var/log/auth.log {
-    weekly
-    rotate 8
-    compress
-    delaycompress
-    missingok
-    notifempty
-    create 640 syslog adm
-}
-
-/var/log/sae_hardening.log {
-    weekly
-    rotate 4
-    compress
-    delaycompress
-    missingok
-    notifempty
-    create 640 root root
-}
-EOF
-
-    log_message "System logging configured"
-}
-
-# Function to apply additional security hardening
-apply_additional_hardening() {
-    log_message "Applying additional security hardening..."
-    
-    # Disable unnecessary services
-    local unnecessary_services=("telnet" "ftp" "rsh-server" "finger")
-    for service in "${unnecessary_services[@]}"; do
-        if systemctl is-enabled "${service}" 2>/dev/null; then
-            sudo systemctl disable "${service}"
-            sudo systemctl stop "${service}"
-            log_message "Disabled unnecessary service: ${service}"
-        fi
-    done
-    
-    # Set secure file permissions on critical files
-    local critical_files=(
-        "/etc/passwd:644:root:root"
-        "/etc/shadow:640:root:shadow"
-        "/etc/sudoers:440:root:root"
-        "/etc/ssh/sshd_config:600:root:root"
-    )
-    
-    for file_spec in "${critical_files[@]}"; do
-        IFS=':' read -r file_path perms owner group <<< "${file_spec}"
-        if [[ -f "${file_path}" ]]; then
-            sudo chmod "${perms}" "${file_path}"
-            sudo chown "${owner}:${group}" "${file_path}"
-            log_message "Set permissions ${perms} ${owner}:${group} on ${file_path}"
-        fi
-    done
-    
-    # Update system packages
-    log_message "Updating system packages..."
-    sudo apt update
-    sudo apt upgrade -y
-    
-    # Install additional security tools
-    sudo apt install -y \
-        aide \
-        chkrootkit \
-        rkhunter \
-        lynis \
-        unattended-upgrades
+    # Start services
+    sudo systemctl enable --now fail2ban
+    sudo systemctl enable --now rsyslog
     
     # Configure automatic security updates
-    sudo dpkg-reconfigure -plow unattended-upgrades
+    echo 'Unattended-Upgrade::Automatic-Reboot "false";' | sudo tee /etc/apt/apt.conf.d/50unattended-upgrades-sae > /dev/null
     
-    log_message "Additional security hardening applied"
+    log "Security tools configured"
 }
 
-# Function to configure passwordless sudo for automation accounts
-configure_automation_sudo() {
-    log_message "Configuring passwordless sudo for automation accounts..."
+# Set secure file permissions
+secure_files() {
+    log "Setting secure file permissions..."
     
-    # Configure based on hostname/server type
-    case "${HOSTNAME}" in
-        *control*)
-            if id "ansible" &>/dev/null; then
-                echo "ansible ALL=(ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/ansible > /dev/null
-                log_message "Configured passwordless sudo for ansible user"
-            fi
-            ;;
-        *)
-            if id "automation" &>/dev/null; then
-                echo "automation ALL=(ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/automation > /dev/null
-                log_message "Configured passwordless sudo for automation user"
-            fi
-            ;;
-    esac
+    # Critical system files
+    sudo chmod 644 /etc/passwd
+    sudo chmod 640 /etc/shadow
+    sudo chmod 440 /etc/sudoers
     
-    # Ensure labrat user has passwordless sudo (for manual administration)
-    if id "labrat" &>/dev/null; then
-        echo "labrat ALL=(ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/labrat > /dev/null
-        log_message "Configured passwordless sudo for labrat user"
-    fi
+    # SSH configuration
+    sudo chmod 600 /etc/ssh/sshd_config
+    
+    log "File permissions secured"
 }
 
-# Main execution flow
+# Update system packages
+update_system() {
+    log "Updating system packages..."
+    
+    sudo apt update -qq
+    sudo apt upgrade -y
+    
+    log "System packages updated"
+}
+
+# Main execution
 main() {
-    log_message "=== Starting SAE Lab Server Hardening ==="
-    log_message "Hostname: ${HOSTNAME}"
-    log_message "User: $(whoami)"
-    log_message "Date: $(date)"
+    log "=== SAE Lab Server Hardening ==="
+    log "Hostname: $HOSTNAME"
+    log "User: $(whoami)"
     
-    # Execute hardening steps
-    configure_ssh_security
-    configure_fail2ban
+    setup_users
+    configure_ssh
     configure_firewall
-    configure_logging
-    apply_additional_hardening
-    configure_automation_sudo
+    install_security_tools
+    secure_files
+    update_system
     
-    # Final status
-    log_message "=== SAE Lab Server Hardening Completed Successfully ==="
-    log_message "Hardening log saved to: ${LOG_FILE}"
-    
-    # Display summary
+    log "=== Hardening completed successfully ==="
     echo ""
-    echo -e "${GREEN}=== HARDENING SUMMARY ===${NC}"
-    echo "✅ SSH security configured"
-    echo "✅ fail2ban installed and configured"
-    echo "✅ UFW firewall enabled"
-    echo "✅ System logging configured"
-    echo "✅ Additional security hardening applied"
-    echo "✅ Automation sudo configured"
+    echo "Users configured with passwordless sudo"
+    echo "SSH security hardened" 
+    echo "UFW firewall enabled with role-specific rules"
+    echo "fail2ban protecting SSH"
+    echo "Automatic security updates enabled"
+    echo "File permissions secured"
     echo ""
-    echo -e "${YELLOW}Next steps:${NC}"
-    echo "1. Test SSH connections: ssh homelab-${HOSTNAME}"
-    echo "2. Verify automation access: ssh sae-${HOSTNAME}"
-    echo "3. Run validation script to confirm hardening"
-    echo "4. Review log file: ${LOG_FILE}"
+    echo "Next steps:"
+    echo "1. Test SSH: ssh homelab-$HOSTNAME"
+    echo "2. Test automation: ssh sae-$HOSTNAME" 
+    echo "3. Run validation script"
 }
 
-# Execute main function
 main "$@"

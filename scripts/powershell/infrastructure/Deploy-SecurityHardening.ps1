@@ -1,3 +1,6 @@
+# File: Deploy-SecurityHardening.ps1
+# Deploy security hardening to Linux systems in SAE lab
+
 <#
 .SYNOPSIS
     Deploy security hardening to Linux systems in SAE lab
@@ -51,7 +54,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-# Script locations
+# Script locations relative to this PowerShell script
 $ScriptPath = Split-Path -Parent $MyInvocation.MyCommand.Definition
 $HardeningScript = Join-Path $ScriptPath "scripts\bash\security\sae_lab_hardening.sh"
 $ValidationScript = Join-Path $ScriptPath "scripts\bash\security\sae_lab_validation.sh"
