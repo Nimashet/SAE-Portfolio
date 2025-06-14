@@ -1,13 +1,16 @@
+# File: New-SAELabGPO.ps1
+# Create Group Policy Objects for SAE Lab automation
+
 #Requires -Version 5.1
 #Requires -Modules GroupPolicy, ActiveDirectory
 #Requires -RunAsAdministrator
 
 <#
 .SYNOPSIS
-    SAE Lab GPO Configuration Script
+    Create Group Policy Objects for SAE Lab automation
     
 .DESCRIPTION
-    Sets up GPOs for our automation lab. Creates OUs and configures policies for:
+    Sets up GPOs for automation lab. Creates OUs and configures policies for:
     - WinRM/Ansible connectivity
     - PowerShell execution
     - Firewall rules
@@ -24,11 +27,12 @@
     Nuke existing GPOs and recreate
     
 .EXAMPLE
-    .\Configure-SAE-GPOs.ps1 -Domain lab.servers.lan
+    .\New-SAELabGPO.ps1 -Domain lab.servers.lan
     
 .NOTES
     Run this on the DC. Make sure GPMC is installed.
     Move your boxes to the right OUs after running this.
+    Place in: scripts/powershell/infrastructure/
 #>
 
 param(
@@ -101,7 +105,7 @@ $GPOs = @(
 Write-Host "Creating GPOs..." -ForegroundColor Green
 foreach ($GPODef in $GPOs) {
     try {
-        Get-GPO -Name $GPODef.Name | Out-Null
+        $existing = Get-GPO -Name $GPODef.Name
         
         if ($Force) {
             Remove-GPO -Name $GPODef.Name -Confirm:$false
