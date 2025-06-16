@@ -1,20 +1,22 @@
 # File: Manage-ProxmoxSnapshots.ps1
-# Proxmox VM snapshot management for SAE lab
+# Enhanced Proxmox VM snapshot management for SAE lab
 
 <#
 .SYNOPSIS
-    Manage Proxmox VM snapshots with storage validation and cleanup
+    Manage Proxmox VM snapshots with comprehensive storage validation and disk location tracking
 
 .DESCRIPTION
-    Comprehensive snapshot management for SAE lab VMs:
-    - Create snapshots with storage space validation
+    Enhanced snapshot management for SAE lab VMs:
+    - Create snapshots with full storage space validation across all pools
     - List existing snapshots with size information
     - Delete old snapshots with cleanup policies
+    - Show VM disk locations across all storage pools
+    - Display snapshot storage locations and usage
     - Support for VM groups and individual VMs
-    - Storage monitoring and alerts
+    - Storage monitoring and alerts for all storage types
 
 .PARAMETER Action
-    Action to perform: Create, List, Delete, Cleanup
+    Action to perform: Create, List, Delete, Cleanup, ShowDisks, ShowStorage
 
 .PARAMETER VMList
     Specific VMs to target (VM IDs or names)
@@ -41,6 +43,14 @@
     Seconds to wait after shutdown before snapshot (default: 30)
 
 .EXAMPLE
+    .\Manage-ProxmoxSnapshots.ps1 -Action ShowDisks
+    Show where all VM disks are located across storage pools
+
+.EXAMPLE
+    .\Manage-ProxmoxSnapshots.ps1 -Action ShowStorage
+    Display detailed storage information and snapshot locations
+
+.EXAMPLE
     .\Manage-ProxmoxSnapshots.ps1 -Action Create -VMGroup Linux
     Create snapshots for all Linux VMs
 
@@ -58,14 +68,17 @@
 
 .NOTES
     - Requires SSH access to Proxmox host
-    - Validates storage space before creating snapshots
+    - Validates storage space across all storage pools before creating snapshots
+    - Shows VM disk locations and snapshot storage usage
     - Place in: scripts/powershell/infrastructure/
     - Run from Windows desktop with SSH configured
+    
+    Version 2.0 - Enhanced with disk location tracking and full storage monitoring
 #>
 
 param(
     [Parameter(Mandatory)]
-    [ValidateSet("Create", "List", "Delete", "Cleanup")]
+    [ValidateSet("Create", "List", "Delete", "Cleanup", "ShowDisks", "ShowStorage")]
     [string]$Action,
     
     [string[]]$VMList = @(),
@@ -92,11 +105,11 @@ $ErrorActionPreference = 'Stop'
 
 # VM definitions based on SAE lab
 $VMGroups = @{
-    "All" = @(5001, 5002, 5003, 5004, 5005, 5007, 5008, 5009, 5010, 5011)
-    "Linux" = @(5001, 5002, 5003, 5005, 5007, 5008, 5009)
+    "All" = @(5001, 5002, 5003, 5004, 5005, 5006, 5007, 5008, 5009, 5010, 5011)
+    "Linux" = @(5001, 5002, 5003, 5005, 5006, 5007, 5008, 5009)
     "Windows" = @(5004, 5010, 5011)
     "Infrastructure" = @(5001, 5002, 5003, 5004, 5005)
-    "Targets" = @(5007, 5008, 5009, 5010, 5011)
+    "Targets" = @(5006, 5007, 5008, 5009, 5010, 5011)
 }
 
 $VMNames = @{
@@ -105,6 +118,7 @@ $VMNames = @{
     5003 = "ub24-docker-01"
     5004 = "ws22-dc-01"
     5005 = "ub24-siem-01"
+    5006 = "kali-sec-01"
     5007 = "ub24-tgt-01"
     5008 = "rl9-tgt-01"
     5009 = "ub20-tgt-01"
@@ -144,13 +158,19 @@ function Test-ProxmoxConnection {
 }
 
 function Get-StorageInfo {
-    Write-Status "Checking storage space..."
+    Write-Status "Checking storage space across all pools..."
     
     try {
         $storageResult = ssh $ProxmoxHost "pvesm status" 2>$null
         
         if ($storageResult) {
-            $storageLines = $storageResult -split "`n" | Where-Object { $_ -match "local|local-lvm" }
+            # Show all active storage pools that support VM images
+            $storageLines = $storageResult -split "`n" | Where-Object { 
+                $_ -match "\s+active\s+" -and $_ -match "(local|nvme|ssd|lvm|zfs)" 
+            }
+            
+            $totalStorages = 0
+            $warningCount = 0
             
             foreach ($line in $storageLines) {
                 if ($line -match "(\S+)\s+\S+\s+\S+\s+(\d+)\s+(\d+)\s+(\d+)") {
@@ -160,15 +180,29 @@ function Get-StorageInfo {
                     $available = [math]::Round($matches[4] / 1GB, 2)
                     $percentUsed = [math]::Round(($used / $total) * 100, 1)
                     
-                    Write-Status "Storage $storageName`: ${used}GB used / ${total}GB total (${percentUsed}% used, ${available}GB free)"
+                    # Handle TB-scale storage display
+                    if ($total -gt 1000) {
+                        $totalTB = [math]::Round($total / 1024, 2)
+                        $usedTB = [math]::Round($used / 1024, 2)
+                        $availableTB = [math]::Round($available / 1024, 2)
+                        Write-Status "Storage $storageName`: ${usedTB}TB used / ${totalTB}TB total (${percentUsed}% used, ${availableTB}TB free)"
+                    } else {
+                        Write-Status "Storage $storageName`: ${used}GB used / ${total}GB total (${percentUsed}% used, ${available}GB free)"
+                    }
                     
                     if ($percentUsed -gt 90) {
-                        Write-Status "Storage $storageName is critically low on space" "WARNING"
+                        Write-Status "Storage $storageName is critically low on space" "ERROR"
+                        $warningCount++
                     } elseif ($percentUsed -gt 80) {
                         Write-Status "Storage $storageName is getting low on space" "WARNING"
+                        $warningCount++
                     }
+                    
+                    $totalStorages++
                 }
             }
+            
+            Write-Status "Checked $totalStorages storage pools, $warningCount warnings"
             return $true
         } else {
             Write-Status "Could not retrieve storage information" "WARNING"
@@ -177,6 +211,133 @@ function Get-StorageInfo {
     } catch {
         Write-Status "Failed to check storage: $($_.Exception.Message)" "ERROR"
         return $false
+    }
+}
+
+function Get-VMDiskLocations {
+    Write-Status "Checking VM disk locations across all storage pools..."
+    
+    $storageDistribution = @{}
+    
+    foreach ($vmid in $VMGroups["All"]) {
+        $vmName = $VMNames[$vmid]
+        Write-Host "VM $vmid ($vmName):"
+        
+        try {
+            $config = ssh $ProxmoxHost "qm config $vmid" 2>$null
+            if ($config) {
+                $diskLines = $config | Where-Object { $_ -match "^(scsi|ide|virtio|sata)" -and $_ -notmatch "cdrom" }
+                
+                foreach ($line in $diskLines) {
+                    if ($line -match "^(\w+\d+):\s*([^:,]+):") {
+                        $diskName = $matches[1]
+                        $storage = $matches[2]
+                        
+                        # Track storage distribution
+                        if (-not $storageDistribution.ContainsKey($storage)) {
+                            $storageDistribution[$storage] = @()
+                        }
+                        $storageDistribution[$storage] += "$vmid ($vmName)"
+                        
+                        # Color code based on storage type
+                        $color = switch ($storage) {
+                            "nvme-storage" { "Green" }
+                            "ssd-storage"  { "Cyan" }
+                            "local-lvm"    { "Yellow" }
+                            "local"        { "Red" }
+                            default        { "White" }
+                        }
+                        
+                        Write-Host "  $diskName`: $storage" -ForegroundColor $color
+                    }
+                }
+            } else {
+                Write-Status "  No disk configuration found" "WARNING"
+            }
+        } catch {
+            Write-Status "  Failed to get config for VM $vmid" "ERROR"
+        }
+        Write-Host ""
+    }
+    
+    # Display storage distribution summary
+    Write-Host "Storage Distribution Summary:" -ForegroundColor Cyan
+    Write-Host "============================" -ForegroundColor Cyan
+    foreach ($storage in $storageDistribution.Keys | Sort-Object) {
+        $vmCount = $storageDistribution[$storage].Count
+        Write-Host "$storage`: $vmCount VMs" -ForegroundColor White
+        foreach ($vm in $storageDistribution[$storage]) {
+            Write-Host "  - $vm" -ForegroundColor Gray
+        }
+        Write-Host ""
+    }
+}
+
+function Get-SnapshotLocations {
+    Write-Status "Analyzing snapshot storage locations and usage..."
+    
+    try {
+        # Get LVM information for snapshot analysis
+        $lvmInfo = ssh $ProxmoxHost "lvs --noheadings -o lv_name,vg_name,lv_size,data_percent 2>/dev/null | grep snap" 2>$null
+        
+        if ($lvmInfo) {
+            Write-Host "LVM Snapshot Details:" -ForegroundColor Cyan
+            Write-Host "=====================" -ForegroundColor Cyan
+            
+            $snapshots = $lvmInfo -split "`n" | Where-Object { $_ -match "snap" }
+            foreach ($snap in $snapshots) {
+                if ($snap -match "\s*(\S+)\s+(\S+)\s+(\S+)\s+(\S+)") {
+                    $snapName = $matches[1].Trim()
+                    $vgName = $matches[2].Trim()
+                    $size = $matches[3].Trim()
+                    $usage = $matches[4].Trim()
+                    
+                    Write-Host "  $snapName (VG: $vgName) - Size: $size, Usage: $usage%" -ForegroundColor White
+                }
+            }
+        } else {
+            Write-Status "No LVM snapshots found or LVM not accessible"
+        }
+        
+        # Get storage pool information for thin pools
+        Write-Host "`nThin Pool Information:" -ForegroundColor Cyan
+        Write-Host "======================" -ForegroundColor Cyan
+        
+        $thinPools = ssh $ProxmoxHost "lvs --noheadings -o lv_name,vg_name,data_percent,metadata_percent -S 'lv_attr=~twi'" 2>$null
+        if ($thinPools) {
+            $pools = $thinPools -split "`n" | Where-Object { $_ -match "\w" }
+            foreach ($pool in $pools) {
+                if ($pool -match "\s*(\S+)\s+(\S+)\s+(\S+)\s+(\S+)") {
+                    $poolName = $matches[1].Trim()
+                    $vgName = $matches[2].Trim()
+                    $dataUsage = $matches[3].Trim()
+                    $metaUsage = $matches[4].Trim()
+                    
+                    Write-Host "  $poolName (VG: $vgName) - Data: $dataUsage%, Metadata: $metaUsage%" -ForegroundColor White
+                }
+            }
+        } else {
+            Write-Status "No thin pools found or not accessible"
+        }
+        
+        # Show where snapshots would be created based on VM locations
+        Write-Host "`nSnapshot Storage Mapping:" -ForegroundColor Cyan
+        Write-Host "=========================" -ForegroundColor Cyan
+        
+        foreach ($vmid in $VMGroups["All"]) {
+            $vmName = $VMNames[$vmid]
+            $config = ssh $ProxmoxHost "qm config $vmid" 2>$null
+            if ($config) {
+                $diskLine = $config | Where-Object { $_ -match "^scsi0:" } | Select-Object -First 1
+                if ($diskLine -match "scsi0:\s*([^:,]+):") {
+                    $storage = $matches[1]
+                    Write-Host "  VM $vmid ($vmName) snapshots → $storage" -ForegroundColor Gray
+                }
+            }
+        }
+        
+    } catch {
+        Write-Status "Failed to get snapshot location information: $($_.Exception.Message)" "ERROR"
     }
 }
 
@@ -460,8 +621,8 @@ function Invoke-SnapshotCleanup {
 }
 
 # Main execution
-Write-Host "Proxmox Snapshot Management" -ForegroundColor Cyan
-Write-Host "===========================" -ForegroundColor Cyan
+Write-Host "Enhanced Proxmox Snapshot Management" -ForegroundColor Cyan
+Write-Host "====================================" -ForegroundColor Cyan
 Write-Host ""
 
 # Test connection
@@ -469,7 +630,23 @@ if (!(Test-ProxmoxConnection)) {
     exit 1
 }
 
-# Check storage if creating snapshots
+# Handle information-only actions
+switch ($Action) {
+    "ShowDisks" {
+        Get-VMDiskLocations
+        Write-Status "Disk location analysis completed"
+        exit 0
+    }
+    "ShowStorage" {
+        Get-StorageInfo | Out-Null
+        Write-Host ""
+        Get-SnapshotLocations
+        Write-Status "Storage analysis completed"
+        exit 0
+    }
+}
+
+# Check storage for snapshot operations
 if ($Action -eq "Create") {
     Get-StorageInfo | Out-Null
 }
