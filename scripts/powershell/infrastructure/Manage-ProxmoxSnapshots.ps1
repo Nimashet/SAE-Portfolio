@@ -105,11 +105,11 @@ $ErrorActionPreference = 'Stop'
 
 # VM definitions based on SAE lab
 $VMGroups = @{
-    "All" = @(5001, 5002, 5003, 5004, 5005, 5007, 5008, 5009, 5010, 5011)
-    "Linux" = @(5001, 5002, 5003, 5005, 5007, 5008, 5009)
+    "All" = @(5001, 5002, 5003, 5004, 5005, 5006, 5007, 5008, 5009, 5010, 5011)
+    "Linux" = @(5001, 5002, 5003, 5005, 5006, 5007, 5008, 5009)
     "Windows" = @(5004, 5010, 5011)
     "Infrastructure" = @(5001, 5002, 5003, 5004, 5005)
-    "Targets" = @(5007, 5008, 5009, 5010, 5011)
+    "Targets" = @(5006, 5007, 5008, 5009, 5010, 5011)
 }
 
 $VMNames = @{
@@ -118,11 +118,113 @@ $VMNames = @{
     5003 = "ub24-docker-01"
     5004 = "ws22-dc-01"
     5005 = "ub24-siem-01"
+    5006 = "kali-sec-01"
     5007 = "ub24-tgt-01"
     5008 = "rl9-tgt-01"
     5009 = "ub20-tgt-01"
     5010 = "ws22-tgt-01"
     5011 = "w11-tgt-01"
+}
+
+# Core utility functions for robust operations
+function Invoke-ProxmoxCommand {
+    param([string]$Command, [int]$TimeoutSeconds = 30)
+    
+    try {
+        $result = ssh -o ConnectTimeout=$TimeoutSeconds $ProxmoxHost $Command 2>&1
+        $exitCode = $LASTEXITCODE
+        
+        return @{
+            Success = ($exitCode -eq 0)
+            Output = $result
+            ExitCode = $exitCode
+            Command = $Command
+        }
+    } catch {
+        return @{
+            Success = $false
+            Output = $_.Exception.Message
+            ExitCode = -1
+            Command = $Command
+        }
+    }
+}
+
+function Test-Prerequisites {
+    $issues = @()
+    
+    # Check SSH config
+    if (-not (Test-Path "~/.ssh/config")) {
+        $issues += "SSH config file not found at ~/.ssh/config"
+    }
+    
+    # Test SSH connectivity with timeout
+    try {
+        $result = Invoke-ProxmoxCommand "pveversion"
+        if (-not $result.Success) {
+            $issues += "Cannot connect to Proxmox host '$ProxmoxHost'. Check SSH configuration."
+        }
+    } catch {
+        $issues += "SSH connection failed: $($_.Exception.Message)"
+    }
+    
+    # Check for required tools
+    try {
+        $null = Get-Command ssh -ErrorAction Stop
+    } catch {
+        $issues += "SSH client not found or not in PATH"
+    }
+    
+    return $issues
+}
+
+function Wait-VMShutdown {
+    param([int[]]$VMIDs, [int]$TimeoutSeconds = 120)
+    
+    if ($VMIDs.Count -eq 0) {
+        return @{ Success = $true; StillRunning = @(); TimeoutReached = $false }
+    }
+    
+    $startTime = Get-Date
+    $stillRunning = $VMIDs
+    
+    Write-Status "Waiting for VMs to shutdown (timeout: ${TimeoutSeconds}s)..."
+    
+    while ($stillRunning.Count -gt 0 -and ((Get-Date) - $startTime).TotalSeconds -lt $TimeoutSeconds) {
+        Start-Sleep -Seconds 3
+        $newStillRunning = @()
+        
+        foreach ($vmid in $stillRunning) {
+            $result = Invoke-ProxmoxCommand "qm status $vmid"
+            if ($result.Success -and $result.Output -like "*running*") {
+                $newStillRunning += $vmid
+            } else {
+                Write-Status "  VM $vmid shutdown confirmed" "SUCCESS"
+            }
+        }
+        $stillRunning = $newStillRunning
+        
+        if ($stillRunning.Count -gt 0) {
+            Write-Host "  Still waiting for VMs: $($stillRunning -join ', ')" -ForegroundColor Yellow
+        }
+    }
+    
+    return @{
+        Success = ($stillRunning.Count -eq 0)
+        StillRunning = $stillRunning
+        TimeoutReached = ((Get-Date) - $startTime).TotalSeconds -ge $TimeoutSeconds
+    }
+}
+
+function Test-ValidSnapshotName {
+    param([string]$Name)
+    
+    if ([string]::IsNullOrWhiteSpace($Name)) {
+        return $false
+    }
+    
+    # Allow letters, numbers, hyphens, underscores, and dots
+    return $Name -match '^[a-zA-Z0-9\-_.]+$'
 }
 
 function Write-Status {
@@ -141,75 +243,252 @@ function Write-Status {
 function Test-ProxmoxConnection {
     Write-Status "Testing Proxmox connectivity..."
     
-    try {
-        $result = ssh -o ConnectTimeout=10 $ProxmoxHost "pveversion" 2>$null
-        if ($result -like "*pve-manager*") {
-            Write-Status "Connected to Proxmox: $result" "SUCCESS"
-            return $true
-        } else {
-            Write-Status "Invalid response from Proxmox host" "ERROR"
-            return $false
-        }
-    } catch {
+    $result = Invoke-ProxmoxCommand "pveversion"
+    if ($result.Success) {
+        Write-Status "Connected to Proxmox: $($result.Output)" "SUCCESS"
+        return $true
+    } else {
         Write-Status "Cannot connect to Proxmox host $ProxmoxHost" "ERROR"
+        Write-Status "Error: $($result.Output)" "ERROR"
         return $false
     }
 }
 
 function Get-StorageInfo {
-    Write-Status "Checking storage space across all pools..."
+    param([switch]$ReturnData, [string]$Label = "")
+    
+    if ($Label) {
+        Write-Status "$Label - Checking storage space across all pools..."
+    } else {
+        Write-Status "Checking storage space across all pools..."
+    }
     
     try {
-        $storageResult = ssh $ProxmoxHost "pvesm status" 2>$null
+        $result = Invoke-ProxmoxCommand "pvesm status"
+        if (-not $result.Success) {
+            Write-Status "Failed to get storage status: $($result.Output)" "ERROR"
+            return @{}
+        }
         
-        if ($storageResult) {
-            # Show all active storage pools that support VM images
-            $storageLines = $storageResult -split "`n" | Where-Object { 
-                $_ -match "\s+active\s+" -and $_ -match "(local|nvme|ssd|lvm|zfs)" 
-            }
+        $storageData = @{}
+        $lines = $result.Output -split "`n" | Select-Object -Skip 1
+        
+        $totalStorages = 0
+        $warningCount = 0
+        
+        foreach ($line in $lines) {
+            $fields = $line -split '\s+' | Where-Object { $_.Trim() -ne "" }
             
-            $totalStorages = 0
-            $warningCount = 0
-            
-            foreach ($line in $storageLines) {
-                if ($line -match "(\S+)\s+\S+\s+\S+\s+(\d+)\s+(\d+)\s+(\d+)") {
-                    $storageName = $matches[1]
-                    $total = [math]::Round($matches[2] / 1GB, 2)
-                    $used = [math]::Round($matches[3] / 1GB, 2)
-                    $available = [math]::Round($matches[4] / 1GB, 2)
-                    $percentUsed = [math]::Round(($used / $total) * 100, 1)
+            # Validate we have enough fields and it's an active storage
+            if ($fields.Count -ge 6 -and $fields[2] -eq "active") {
+                $storageName = $fields[0]
+                
+                # Skip non-VM storage types unless explicitly included
+                if ($storageName -notmatch "(local|nvme|ssd|lvm|zfs|ceph|nfs)") {
+                    continue
+                }
+                
+                try {
+                    $total = [math]::Round([long]$fields[3] / 1GB, 2)
+                    $used = [math]::Round([long]$fields[4] / 1GB, 2)
+                    $available = [math]::Round([long]$fields[5] / 1GB, 2)
+                    $percentUsed = if ($total -gt 0) { [math]::Round(($used / $total) * 100, 1) } else { 0 }
                     
-                    # Handle TB-scale storage display
-                    if ($total -gt 1000) {
-                        $totalTB = [math]::Round($total / 1024, 2)
-                        $usedTB = [math]::Round($used / 1024, 2)
-                        $availableTB = [math]::Round($available / 1024, 2)
-                        Write-Status "Storage $storageName`: ${usedTB}TB used / ${totalTB}TB total (${percentUsed}% used, ${availableTB}TB free)"
-                    } else {
-                        Write-Status "Storage $storageName`: ${used}GB used / ${total}GB total (${percentUsed}% used, ${available}GB free)"
+                    # Store data for comparison
+                    $storageData[$storageName] = @{
+                        Total = $total
+                        Used = $used
+                        Available = $available
+                        PercentUsed = $percentUsed
                     }
                     
-                    if ($percentUsed -gt 90) {
-                        Write-Status "Storage $storageName is critically low on space" "ERROR"
-                        $warningCount++
-                    } elseif ($percentUsed -gt 80) {
-                        Write-Status "Storage $storageName is getting low on space" "WARNING"
-                        $warningCount++
+                    if (!$ReturnData) {
+                        # Handle TB-scale storage display
+                        if ($total -gt 1000) {
+                            $totalTB = [math]::Round($total / 1024, 2)
+                            $usedTB = [math]::Round($used / 1024, 2)
+                            $availableTB = [math]::Round($available / 1024, 2)
+                            Write-Status "Storage $storageName`: ${usedTB}TB used / ${totalTB}TB total (${percentUsed}% used, ${availableTB}TB free)"
+                        } else {
+                            Write-Status "Storage $storageName`: ${used}GB used / ${total}GB total (${percentUsed}% used, ${available}GB free)"
+                        }
+                        
+                        if ($percentUsed -gt 90) {
+                            Write-Status "Storage $storageName is critically low on space" "ERROR"
+                            $warningCount++
+                        } elseif ($percentUsed -gt 80) {
+                            Write-Status "Storage $storageName is getting low on space" "WARNING"
+                            $warningCount++
+                        }
                     }
                     
                     $totalStorages++
+                    
+                } catch {
+                    Write-Status "Failed to parse storage data for $storageName" "WARNING"
                 }
             }
-            
-            Write-Status "Checked $totalStorages storage pools, $warningCount warnings"
-            return $true
-        } else {
-            Write-Status "Could not retrieve storage information" "WARNING"
-            return $false
         }
+        
+        if (!$ReturnData) {
+            Write-Status "Checked $totalStorages storage pools, $warningCount warnings"
+        }
+        
+        return $storageData
+        
     } catch {
         Write-Status "Failed to check storage: $($_.Exception.Message)" "ERROR"
-        return $false
+        return @{}
+    }
+}
+
+function Get-VMSnapshotSizes {
+    param([int[]]$VMIDs)
+    
+    $snapshotData = @{}
+    
+    foreach ($vmid in $VMIDs) {
+        if (-not $VMNames.ContainsKey($vmid)) {
+            Write-Status "Skipping unknown VM ID: $vmid" "WARNING"
+            continue
+        }
+        
+        $vmName = $VMNames[$vmid]
+        $snapshotData[$vmid] = @{
+            VMName = $vmName
+            Snapshots = @()
+            TotalSnapshotSize = 0
+        }
+        
+        try {
+            # Get LVM snapshot information for this VM
+            $result = Invoke-ProxmoxCommand "lvs --noheadings -o lv_name,lv_size,data_percent --units g 2>/dev/null | grep 'snap_vm-$vmid-'"
+            
+            if ($result.Success -and $result.Output) {
+                $snapLines = $result.Output -split "`n" | Where-Object { $_ -match "snap_vm-$vmid-" }
+                
+                foreach ($line in $snapLines) {
+                    if ($line -match "\s*(\S+)\s+(\S+)\s+(\S+)") {
+                        $snapName = $matches[1].Trim()
+                        $size = $matches[2].Trim()
+                        $usage = $matches[3].Trim()
+                        
+                        # Parse size (remove 'g' suffix and convert to GB)
+                        $sizeGB = try {
+                            [math]::Round([float]($size -replace '[^\d\.]', ''), 2)
+                        } catch {
+                            0
+                        }
+                        
+                        $snapshotData[$vmid].Snapshots += @{
+                            Name = $snapName
+                            Size = $sizeGB
+                            Usage = $usage
+                        }
+                        
+                        $snapshotData[$vmid].TotalSnapshotSize += $sizeGB
+                    }
+                }
+            }
+        } catch {
+            Write-Status "Failed to get snapshot sizes for VM $vmid`: $($_.Exception.Message)" "WARNING"
+        }
+    }
+    
+    return $snapshotData
+}
+
+function Show-StorageComparison {
+    param($BeforeStorage, $AfterStorage)
+    
+    Write-Host "`nStorage Usage Comparison:" -ForegroundColor Cyan
+    Write-Host "=========================" -ForegroundColor Cyan
+    
+    foreach ($storage in $BeforeStorage.Keys | Sort-Object) {
+        if ($AfterStorage.ContainsKey($storage)) {
+            $before = $BeforeStorage[$storage]
+            $after = $AfterStorage[$storage]
+            
+            $usedDiff = $after.Used - $before.Used
+            $availableDiff = $before.Available - $after.Available
+            $percentDiff = $after.PercentUsed - $before.PercentUsed
+            
+            if ($before.Total -gt 1000) {
+                # TB scale
+                $beforeUsedTB = [math]::Round($before.Used / 1024, 3)
+                $afterUsedTB = [math]::Round($after.Used / 1024, 3)
+                $diffTB = [math]::Round($usedDiff / 1024, 3)
+                
+                Write-Host "$storage`:" -ForegroundColor White
+                Write-Host "  Before: ${beforeUsedTB}TB used (${before.PercentUsed}%)" -ForegroundColor Gray
+                Write-Host "  After:  ${afterUsedTB}TB used (${after.PercentUsed}%)" -ForegroundColor Gray
+                
+                if ([math]::Abs($diffTB) -gt 0.001) {
+                    $color = if ($diffTB -gt 0) { "Yellow" } else { "Green" }
+                    $sign = if ($diffTB -gt 0) { "+" } else { "" }
+                    Write-Host "  Change: ${sign}${diffTB}TB (${sign}${percentDiff:F2}%)" -ForegroundColor $color
+                } else {
+                    Write-Host "  Change: No significant change" -ForegroundColor Green
+                }
+            } else {
+                # GB scale
+                Write-Host "$storage`:" -ForegroundColor White
+                Write-Host "  Before: ${before.Used}GB used (${before.PercentUsed}%)" -ForegroundColor Gray
+                Write-Host "  After:  ${after.Used}GB used (${after.PercentUsed}%)" -ForegroundColor Gray
+                
+                if ([math]::Abs($usedDiff) -gt 0.01) {
+                    $color = if ($usedDiff -gt 0) { "Yellow" } else { "Green" }
+                    $sign = if ($usedDiff -gt 0) { "+" } else { "" }
+                    Write-Host "  Change: ${sign}${usedDiff:F2}GB (${sign}${percentDiff:F2}%)" -ForegroundColor $color
+                } else {
+                    Write-Host "  Change: No significant change" -ForegroundColor Green
+                }
+            }
+            Write-Host ""
+        }
+    }
+}
+
+function Show-SnapshotSummary {
+    param($BeforeSnapshots, $AfterSnapshots, $CreatedSnapshots, [string]$SnapshotName)
+    
+    Write-Host "`nSnapshot Creation Summary:" -ForegroundColor Cyan
+    Write-Host "==========================" -ForegroundColor Cyan
+    
+    if ($CreatedSnapshots.Count -gt 0) {
+        Write-Host "Successfully created snapshots:" -ForegroundColor Green
+        foreach ($vmid in $CreatedSnapshots) {
+            $vmName = $VMNames[$vmid]
+            Write-Host "  ✓ VM $vmid ($vmName) - '$SnapshotName'" -ForegroundColor Green
+        }
+        Write-Host ""
+    }
+    
+    Write-Host "Snapshot Storage Analysis:" -ForegroundColor White
+    Write-Host "-------------------------" -ForegroundColor White
+    
+    foreach ($vmid in ($BeforeSnapshots.Keys + $AfterSnapshots.Keys | Sort-Object -Unique)) {
+        $vmName = $VMNames[$vmid]
+        $beforeTotal = if ($BeforeSnapshots.ContainsKey($vmid)) { $BeforeSnapshots[$vmid].TotalSnapshotSize } else { 0 }
+        $afterTotal = if ($AfterSnapshots.ContainsKey($vmid)) { $AfterSnapshots[$vmid].TotalSnapshotSize } else { 0 }
+        $newSnapshotSize = $afterTotal - $beforeTotal
+        
+        Write-Host "VM $vmid ($vmName):" -ForegroundColor White
+        
+        if ($AfterSnapshots.ContainsKey($vmid)) {
+            $snapCount = $AfterSnapshots[$vmid].Snapshots.Count
+            Write-Host "  Total snapshots: $snapCount" -ForegroundColor Gray
+            Write-Host "  Total snapshot storage: ${afterTotal:F2}GB" -ForegroundColor Gray
+            
+            if ($newSnapshotSize -gt 0) {
+                Write-Host "  New snapshot size: ${newSnapshotSize:F2}GB" -ForegroundColor Yellow
+            } else {
+                Write-Host "  New snapshot size: No new snapshots" -ForegroundColor Gray
+            }
+        } else {
+            Write-Host "  No snapshots found" -ForegroundColor Gray
+        }
+        Write-Host ""
     }
 }
 
@@ -219,14 +498,23 @@ function Get-VMDiskLocations {
     $storageDistribution = @{}
     
     foreach ($vmid in $VMGroups["All"]) {
+        if (-not $VMNames.ContainsKey($vmid)) {
+            Write-Status "Skipping unknown VM ID: $vmid" "WARNING"
+            continue
+        }
+        
         $vmName = $VMNames[$vmid]
         Write-Host "VM $vmid ($vmName):"
         
-        try {
-            $config = ssh $ProxmoxHost "qm config $vmid" 2>$null
-            if ($config) {
-                $diskLines = $config | Where-Object { $_ -match "^(scsi|ide|virtio|sata)" -and $_ -notmatch "cdrom" }
-                
+        $result = Invoke-ProxmoxCommand "qm config $vmid"
+        if ($result.Success) {
+            $diskLines = $result.Output -split "`n" | Where-Object { 
+                $_ -match "^(scsi|ide|virtio|sata)" -and $_ -notmatch "cdrom" 
+            }
+            
+            if ($diskLines.Count -eq 0) {
+                Write-Status "  No disk configuration found" "WARNING"
+            } else {
                 foreach ($line in $diskLines) {
                     if ($line -match "^(\w+\d+):\s*([^:,]+):") {
                         $diskName = $matches[1]
@@ -250,11 +538,9 @@ function Get-VMDiskLocations {
                         Write-Host "  $diskName`: $storage" -ForegroundColor $color
                     }
                 }
-            } else {
-                Write-Status "  No disk configuration found" "WARNING"
             }
-        } catch {
-            Write-Status "  Failed to get config for VM $vmid" "ERROR"
+        } else {
+            Write-Status "  Failed to get config for VM $vmid`: $($result.Output)" "ERROR"
         }
         Write-Host ""
     }
@@ -277,22 +563,26 @@ function Get-SnapshotLocations {
     
     try {
         # Get LVM information for snapshot analysis
-        $lvmInfo = ssh $ProxmoxHost "lvs --noheadings -o lv_name,vg_name,lv_size,data_percent 2>/dev/null | grep snap" 2>$null
+        $result = Invoke-ProxmoxCommand "lvs --noheadings -o lv_name,vg_name,lv_size,data_percent 2>/dev/null | grep snap"
         
-        if ($lvmInfo) {
+        if ($result.Success -and $result.Output) {
             Write-Host "LVM Snapshot Details:" -ForegroundColor Cyan
             Write-Host "=====================" -ForegroundColor Cyan
             
-            $snapshots = $lvmInfo -split "`n" | Where-Object { $_ -match "snap" }
-            foreach ($snap in $snapshots) {
-                if ($snap -match "\s*(\S+)\s+(\S+)\s+(\S+)\s+(\S+)") {
-                    $snapName = $matches[1].Trim()
-                    $vgName = $matches[2].Trim()
-                    $size = $matches[3].Trim()
-                    $usage = $matches[4].Trim()
-                    
-                    Write-Host "  $snapName (VG: $vgName) - Size: $size, Usage: $usage%" -ForegroundColor White
+            $snapshots = $result.Output -split "`n" | Where-Object { $_ -match "snap" }
+            if ($snapshots.Count -gt 0) {
+                foreach ($snap in $snapshots) {
+                    if ($snap -match "\s*(\S+)\s+(\S+)\s+(\S+)\s+(\S+)") {
+                        $snapName = $matches[1].Trim()
+                        $vgName = $matches[2].Trim()
+                        $size = $matches[3].Trim()
+                        $usage = $matches[4].Trim()
+                        
+                        Write-Host "  $snapName (VG: $vgName) - Size: $size, Usage: $usage%" -ForegroundColor White
+                    }
                 }
+            } else {
+                Write-Status "No LVM snapshots found"
             }
         } else {
             Write-Status "No LVM snapshots found or LVM not accessible"
@@ -302,18 +592,22 @@ function Get-SnapshotLocations {
         Write-Host "`nThin Pool Information:" -ForegroundColor Cyan
         Write-Host "======================" -ForegroundColor Cyan
         
-        $thinPools = ssh $ProxmoxHost "lvs --noheadings -o lv_name,vg_name,data_percent,metadata_percent -S 'lv_attr=~twi'" 2>$null
-        if ($thinPools) {
-            $pools = $thinPools -split "`n" | Where-Object { $_ -match "\w" }
-            foreach ($pool in $pools) {
-                if ($pool -match "\s*(\S+)\s+(\S+)\s+(\S+)\s+(\S+)") {
-                    $poolName = $matches[1].Trim()
-                    $vgName = $matches[2].Trim()
-                    $dataUsage = $matches[3].Trim()
-                    $metaUsage = $matches[4].Trim()
-                    
-                    Write-Host "  $poolName (VG: $vgName) - Data: $dataUsage%, Metadata: $metaUsage%" -ForegroundColor White
+        $thinResult = Invoke-ProxmoxCommand "lvs --noheadings -o lv_name,vg_name,data_percent,metadata_percent -S 'lv_attr=~twi'"
+        if ($thinResult.Success -and $thinResult.Output) {
+            $pools = $thinResult.Output -split "`n" | Where-Object { $_ -match "\w" }
+            if ($pools.Count -gt 0) {
+                foreach ($pool in $pools) {
+                    if ($pool -match "\s*(\S+)\s+(\S+)\s+(\S+)\s+(\S+)") {
+                        $poolName = $matches[1].Trim()
+                        $vgName = $matches[2].Trim()
+                        $dataUsage = $matches[3].Trim()
+                        $metaUsage = $matches[4].Trim()
+                        
+                        Write-Host "  $poolName (VG: $vgName) - Data: $dataUsage%, Metadata: $metaUsage%" -ForegroundColor White
+                    }
                 }
+            } else {
+                Write-Status "No thin pools found"
             }
         } else {
             Write-Status "No thin pools found or not accessible"
@@ -324,10 +618,14 @@ function Get-SnapshotLocations {
         Write-Host "=========================" -ForegroundColor Cyan
         
         foreach ($vmid in $VMGroups["All"]) {
+            if (-not $VMNames.ContainsKey($vmid)) {
+                continue
+            }
+            
             $vmName = $VMNames[$vmid]
-            $config = ssh $ProxmoxHost "qm config $vmid" 2>$null
-            if ($config) {
-                $diskLine = $config | Where-Object { $_ -match "^scsi0:" } | Select-Object -First 1
+            $configResult = Invoke-ProxmoxCommand "qm config $vmid"
+            if ($configResult.Success) {
+                $diskLine = $configResult.Output -split "`n" | Where-Object { $_ -match "^scsi0:" } | Select-Object -First 1
                 if ($diskLine -match "scsi0:\s*([^:,]+):") {
                     $storage = $matches[1]
                     Write-Host "  VM $vmid ($vmName) snapshots → $storage" -ForegroundColor Gray
@@ -349,11 +647,22 @@ function Resolve-VMList {
     } elseif ($VMList.Count -gt 0) {
         $targetVMs = $VMList | ForEach-Object {
             if ($_ -match '^\d+$') {
-                [int]$_
+                $vmid = [int]$_
+                if ($VMNames.ContainsKey($vmid)) {
+                    $vmid
+                } else {
+                    Write-Status "Invalid VM ID: $vmid. Valid IDs: $($VMNames.Keys -join ', ')" "ERROR"
+                    $null
+                }
             } else {
                 $vmName = $_
                 $vmId = $VMNames.GetEnumerator() | Where-Object { $_.Value -eq $vmName } | Select-Object -ExpandProperty Key
-                if ($vmId) { $vmId } else { Write-Status "Unknown VM: $vmName" "WARNING"; $null }
+                if ($vmId) { 
+                    $vmId 
+                } else { 
+                    Write-Status "Unknown VM name: $vmName. Valid names: $($VMNames.Values -join ', ')" "ERROR"
+                    $null 
+                }
             }
         } | Where-Object { $_ -ne $null }
         Write-Status "Using VM list: $($targetVMs.Count) VMs"
@@ -362,15 +671,39 @@ function Resolve-VMList {
         return @()
     }
     
-    return $targetVMs
+    # Final validation of resolved VMs
+    $validVMs = $targetVMs | Where-Object { $VMNames.ContainsKey($_) }
+    if ($validVMs.Count -ne $targetVMs.Count) {
+        $invalidVMs = $targetVMs | Where-Object { -not $VMNames.ContainsKey($_) }
+        Write-Status "Removing invalid VM IDs: $($invalidVMs -join ', ')" "WARNING"
+    }
+    
+    return $validVMs
 }
 
 function New-VMSnapshot {
     param([int[]]$VMIDs, [string]$SnapName)
     
+    # Validate snapshot name
     if (!$SnapName) {
         $SnapName = "snapshot-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
     }
+    
+    if (-not (Test-ValidSnapshotName $SnapName)) {
+        throw "Invalid snapshot name '$SnapName'. Use only letters, numbers, hyphens, underscores, and dots."
+    }
+    
+    # Validate all VM IDs before starting
+    foreach ($vmid in $VMIDs) {
+        if (-not $VMNames.ContainsKey($vmid)) {
+            throw "Invalid VM ID: $vmid. Valid IDs: $($VMNames.Keys -join ', ')"
+        }
+    }
+    
+    # Capture before state
+    Write-Status "Capturing pre-snapshot state..."
+    $beforeStorage = Get-StorageInfo -ReturnData -Label "BEFORE"
+    $beforeSnapshots = Get-VMSnapshotSizes -VMIDs $VMIDs
     
     if ($PowerOff) {
         Write-Status "Creating consistent snapshots (VMs will be powered off temporarily)"
@@ -383,53 +716,64 @@ function New-VMSnapshot {
     $successful = 0
     $failed = 0
     $vmStates = @{}
+    $createdSnapshots = @()
     
     try {
         if ($PowerOff) {
             # Phase 1: Power off VMs and record their states
             Write-Status "Phase 1: Powering off VMs..."
+            $vmsToShutdown = @()
+            
             foreach ($vmid in $VMIDs) {
                 $vmName = $VMNames[$vmid]
                 
                 # Check current state
-                try {
-                    $status = ssh $ProxmoxHost "qm status $vmid" 2>$null
-                    $isRunning = $status -like "*running*"
+                $statusResult = Invoke-ProxmoxCommand "qm status $vmid"
+                if ($statusResult.Success) {
+                    $isRunning = $statusResult.Output -like "*running*"
                     $vmStates[$vmid] = $isRunning
                     
                     if ($isRunning) {
                         Write-Host "  Shutting down VM $vmid ($vmName)... " -NoNewline
                         
                         if (!$DryRun) {
-                            ssh $ProxmoxHost "qm shutdown $vmid" 2>$null | Out-Null
-                            Write-Host "INITIATED" -ForegroundColor Yellow
+                            $shutdownResult = Invoke-ProxmoxCommand "qm shutdown $vmid"
+                            if ($shutdownResult.Success) {
+                                Write-Host "INITIATED" -ForegroundColor Yellow
+                                $vmsToShutdown += $vmid
+                            } else {
+                                Write-Host "FAILED" -ForegroundColor Red
+                                Write-Status "  Shutdown error: $($shutdownResult.Output)" "ERROR"
+                            }
                         } else {
                             Write-Host "WOULD SHUTDOWN" -ForegroundColor Yellow
                         }
                     } else {
                         Write-Status "  VM $vmid ($vmName) already stopped"
                     }
-                } catch {
-                    Write-Status "  Failed to check/shutdown VM $vmid" "ERROR"
+                } else {
+                    Write-Status "  Failed to check status of VM $vmid`: $($statusResult.Output)" "ERROR"
                     $vmStates[$vmid] = $false
                 }
             }
             
-            if (!$DryRun) {
+            if (!$DryRun -and $vmsToShutdown.Count -gt 0) {
                 # Wait for VMs to shut down
-                Write-Status "Waiting $WaitTime seconds for clean shutdown..."
-                Start-Sleep -Seconds $WaitTime
+                $shutdownResult = Wait-VMShutdown -VMIDs $vmsToShutdown -TimeoutSeconds $WaitTime
                 
-                # Verify shutdown
-                Write-Status "Verifying VM shutdown status..."
-                foreach ($vmid in $VMIDs) {
-                    $vmName = $VMNames[$vmid]
-                    $status = ssh $ProxmoxHost "qm status $vmid" 2>$null
-                    if ($status -like "*stopped*") {
-                        Write-Status "  VM $vmid ($vmName): Stopped" "SUCCESS"
-                    } else {
-                        Write-Status "  VM $vmid ($vmName): Still running - forcing stop" "WARNING"
-                        ssh $ProxmoxHost "qm stop $vmid" 2>$null | Out-Null
+                if (-not $shutdownResult.Success) {
+                    if ($shutdownResult.TimeoutReached) {
+                        Write-Status "Shutdown timeout reached. Force stopping remaining VMs..." "WARNING"
+                        foreach ($vmid in $shutdownResult.StillRunning) {
+                            $vmName = $VMNames[$vmid]
+                            Write-Status "  Force stopping VM $vmid ($vmName)" "WARNING"
+                            $stopResult = Invoke-ProxmoxCommand "qm stop $vmid"
+                            if (-not $stopResult.Success) {
+                                Write-Status "  Failed to force stop VM $vmid`: $($stopResult.Output)" "ERROR"
+                            }
+                        }
+                        # Give force stop a moment
+                        Start-Sleep -Seconds 5
                     }
                 }
             }
@@ -443,21 +787,18 @@ function New-VMSnapshot {
             
             if ($DryRun) {
                 Write-Host "WOULD CREATE" -ForegroundColor Yellow
+                $createdSnapshots += $vmid
                 continue
             }
             
-            try {
-                $result = ssh $ProxmoxHost "qm snapshot $vmid $SnapName" 2>&1
-                if ($LASTEXITCODE -eq 0) {
-                    Write-Host "SUCCESS" -ForegroundColor Green
-                    $successful++
-                } else {
-                    Write-Host "FAILED" -ForegroundColor Red
-                    Write-Status "  Error: $result" "ERROR"
-                    $failed++
-                }
-            } catch {
+            $snapshotResult = Invoke-ProxmoxCommand "qm snapshot $vmid $SnapName"
+            if ($snapshotResult.Success) {
+                Write-Host "SUCCESS" -ForegroundColor Green
+                $successful++
+                $createdSnapshots += $vmid
+            } else {
                 Write-Host "FAILED" -ForegroundColor Red
+                Write-Status "  Snapshot error: $($snapshotResult.Output)" "ERROR"
                 $failed++
             }
         }
@@ -472,11 +813,12 @@ function New-VMSnapshot {
                 
                 if ($wasRunning) {
                     Write-Host "  Starting VM $vmid ($vmName)... " -NoNewline
-                    try {
-                        ssh $ProxmoxHost "qm start $vmid" 2>$null | Out-Null
+                    $startResult = Invoke-ProxmoxCommand "qm start $vmid"
+                    if ($startResult.Success) {
                         Write-Host "SUCCESS" -ForegroundColor Green
-                    } catch {
+                    } else {
                         Write-Host "FAILED" -ForegroundColor Red
+                        Write-Status "  Start error: $($startResult.Output)" "ERROR"
                         Write-Status "  Manual start required for VM $vmid" "ERROR"
                     }
                 }
@@ -490,6 +832,20 @@ function New-VMSnapshot {
         Write-Status "All VMs have been restarted to their original state"
     }
     
+    # Capture after state and show summary
+    if (!$DryRun) {
+        Write-Status "Analyzing post-snapshot state..."
+        # Give LVM time to update
+        Start-Sleep -Seconds 5
+        
+        $afterStorage = Get-StorageInfo -ReturnData -Label "AFTER"
+        $afterSnapshots = Get-VMSnapshotSizes -VMIDs $VMIDs
+        
+        # Show comprehensive summary
+        Show-StorageComparison -BeforeStorage $beforeStorage -AfterStorage $afterStorage
+        Show-SnapshotSummary -BeforeSnapshots $beforeSnapshots -AfterSnapshots $afterSnapshots -CreatedSnapshots $createdSnapshots -SnapshotName $SnapName
+    }
+    
     return ($failed -eq 0)
 }
 
@@ -501,12 +857,17 @@ function Get-VMSnapshots {
     $allSnapshots = @()
     
     foreach ($vmid in $VMIDs) {
+        if (-not $VMNames.ContainsKey($vmid)) {
+            Write-Status "Skipping unknown VM ID: $vmid" "WARNING"
+            continue
+        }
+        
         $vmName = $VMNames[$vmid]
         
-        try {
-            $snapshots = ssh $ProxmoxHost "qm listsnapshot $vmid" 2>$null
-            if ($snapshots) {
-                $snapLines = $snapshots -split "`n" | Where-Object { $_ -match "^\s*->" }
+        $result = Invoke-ProxmoxCommand "qm listsnapshot $vmid"
+        if ($result.Success) {
+            if ($result.Output) {
+                $snapLines = $result.Output -split "`n" | Where-Object { $_ -match "^\s*->" }
                 
                 foreach ($line in $snapLines) {
                     if ($line -match "->\s+(\S+)\s+(.+)") {
@@ -522,8 +883,8 @@ function Get-VMSnapshots {
                     }
                 }
             }
-        } catch {
-            Write-Status "Failed to list snapshots for VM $vmid" "ERROR"
+        } else {
+            Write-Status "Failed to list snapshots for VM $vmid`: $($result.Output)" "ERROR"
         }
     }
     
@@ -540,6 +901,16 @@ function Get-VMSnapshots {
 function Remove-VMSnapshot {
     param([int]$VMID, [string]$SnapName)
     
+    if (-not $VMNames.ContainsKey($VMID)) {
+        Write-Status "Invalid VM ID: $VMID" "ERROR"
+        return $false
+    }
+    
+    if (-not (Test-ValidSnapshotName $SnapName)) {
+        Write-Status "Invalid snapshot name: $SnapName" "ERROR"
+        return $false
+    }
+    
     $vmName = $VMNames[$VMID]
     Write-Host "  Deleting snapshot '$SnapName' from VM $VMID ($vmName)... " -NoNewline
     
@@ -548,18 +919,13 @@ function Remove-VMSnapshot {
         return $true
     }
     
-    try {
-        $result = ssh $ProxmoxHost "qm delsnapshot $VMID $SnapName" 2>&1
-        if ($LASTEXITCODE -eq 0) {
-            Write-Host "SUCCESS" -ForegroundColor Green
-            return $true
-        } else {
-            Write-Host "FAILED" -ForegroundColor Red
-            Write-Status "  Error: $result" "ERROR"
-            return $false
-        }
-    } catch {
+    $result = Invoke-ProxmoxCommand "qm delsnapshot $VMID $SnapName"
+    if ($result.Success) {
+        Write-Host "SUCCESS" -ForegroundColor Green
+        return $true
+    } else {
         Write-Host "FAILED" -ForegroundColor Red
+        Write-Status "  Delete error: $($result.Output)" "ERROR"
         return $false
     }
 }
@@ -576,42 +942,45 @@ function Invoke-SnapshotCleanup {
     $errorCount = 0
     
     foreach ($vmid in $VMIDs) {
-        try {
-            $snapshots = ssh $ProxmoxHost "qm listsnapshot $vmid" 2>$null
-            if ($snapshots) {
-                $snapLines = $snapshots -split "`n" | Where-Object { $_ -match "^\s*->" }
-                
-                foreach ($line in $snapLines) {
-                    if ($line -match "->\s+(\S+)\s+(.+)") {
-                        $snapName = $matches[1]
-                        $snapInfo = $matches[2]
+        if (-not $VMNames.ContainsKey($vmid)) {
+            Write-Status "Skipping unknown VM ID: $vmid" "WARNING"
+            continue
+        }
+        
+        $result = Invoke-ProxmoxCommand "qm listsnapshot $vmid"
+        if ($result.Success -and $result.Output) {
+            $snapLines = $result.Output -split "`n" | Where-Object { $_ -match "^\s*->" }
+            
+            foreach ($line in $snapLines) {
+                if ($line -match "->\s+(\S+)\s+(.+)") {
+                    $snapName = $matches[1]
+                    $snapInfo = $matches[2]
+                    
+                    # Try to parse date from snapshot name (format: snapshot-yyyyMMdd-HHmmss)
+                    if ($snapName -match "(\d{8})-(\d{6})") {
+                        $dateStr = $matches[1]
+                        $timeStr = $matches[2]
                         
-                        # Try to parse date from snapshot name (format: snapshot-yyyyMMdd-HHmmss)
-                        if ($snapName -match "(\d{8})-(\d{6})") {
-                            $dateStr = $matches[1]
-                            $timeStr = $matches[2]
+                        try {
+                            $snapDate = [datetime]::ParseExact("$dateStr$timeStr", "yyyyMMddHHmmss", $null)
                             
-                            try {
-                                $snapDate = [datetime]::ParseExact("$dateStr$timeStr", "yyyyMMddHHmmss", $null)
+                            if ($snapDate -lt $cutoffDate) {
+                                Write-Status "Found old snapshot: $snapName ($(Get-Date $snapDate -Format 'yyyy-MM-dd HH:mm:ss'))"
                                 
-                                if ($snapDate -lt $cutoffDate) {
-                                    Write-Status "Found old snapshot: $snapName ($(Get-Date $snapDate -Format 'yyyy-MM-dd HH:mm:ss'))"
-                                    
-                                    if (Remove-VMSnapshot -VMID $vmid -SnapName $snapName) {
-                                        $deletedCount++
-                                    } else {
-                                        $errorCount++
-                                    }
+                                if (Remove-VMSnapshot -VMID $vmid -SnapName $snapName) {
+                                    $deletedCount++
+                                } else {
+                                    $errorCount++
                                 }
-                            } catch {
-                                Write-Status "Could not parse date from snapshot name: $snapName" "WARNING"
                             }
+                        } catch {
+                            Write-Status "Could not parse date from snapshot name: $snapName" "WARNING"
                         }
                     }
                 }
             }
-        } catch {
-            Write-Status "Failed to process snapshots for VM $vmid" "ERROR"
+        } else {
+            Write-Status "Failed to process snapshots for VM $vmid`: $($result.Output)" "ERROR"
             $errorCount++
         }
     }
@@ -623,6 +992,16 @@ function Invoke-SnapshotCleanup {
 Write-Host "Enhanced Proxmox Snapshot Management" -ForegroundColor Cyan
 Write-Host "====================================" -ForegroundColor Cyan
 Write-Host ""
+
+# Check prerequisites first
+$prereqIssues = Test-Prerequisites
+if ($prereqIssues.Count -gt 0) {
+    Write-Status "Prerequisites check failed:" "ERROR"
+    foreach ($issue in $prereqIssues) {
+        Write-Status "  - $issue" "ERROR"
+    }
+    exit 1
+}
 
 # Test connection
 if (!(Test-ProxmoxConnection)) {
@@ -647,7 +1026,7 @@ switch ($Action) {
 
 # Check storage for snapshot operations
 if ($Action -eq "Create") {
-    Get-StorageInfo | Out-Null
+    $null = Get-StorageInfo
 }
 
 # Resolve target VMs
